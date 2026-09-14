@@ -1,0 +1,7 @@
+{"type":"title","v":1,"title":"OMP parser review","source":"user","updatedAt":"2026-08-28T10:05:00.000Z"}
+{"type":"session","version":3,"id":"omp-123","timestamp":"2026-08-28T10:00:00.000Z","cwd":"/repo/demo","title":"OMP parser review"}
+{"type":"model_change","id":"model-1","parentId":null,"timestamp":"2026-08-28T10:00:01.000Z","model":"openai-codex/gpt-5.6-sol"}
+{"type":"message","id":"message-1","parentId":"model-1","timestamp":"2026-08-28T10:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"Inspect the parser."}]}}
+{"type":"message","id":"message-2","parentId":"message-1","timestamp":"2026-08-28T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning"},{"type":"text","text":"I will read the parser."},{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"parser.js"}}]}}
+{"type":"message","id":"message-3","parentId":"message-2","timestamp":"2026-08-28T10:00:04.000Z","message":{"role":"toolResult","toolCallId":"call-1","content":[{"type":"text","text":"parser source"}],"isError":false}}
+{"type":"message","id":"message-4","parentId":"message-3","timestamp":"2026-08-28T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The parser is correct."}]}}

@@ -148,6 +148,8 @@ export function contentToEvents(role, content, events) {
         break;
       case "thinking":
       case "reasoning":
+      case "reasoning_trace":
+      case "open_a_i_reasoning":
         break;
       default:
         if (typeof block.text === "string") texts.push(block.text);

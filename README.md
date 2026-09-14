@@ -32,7 +32,7 @@ The loop only closes when a human happens to remember a failure and edits the fi
 what happened in them, and proposes evidence-backed edits to your memory surface - the
 memory file and project skills - under a token budget, gated by you.
 
-- **Local-first** - Reads the transcript stores of seven agent harnesses directly from disk,
+- **Local-first** - Reads the transcript stores of nine agent harnesses directly from disk,
   locally or over SSH to your own machines. No API, no upload; transcripts never leave your
   machines except into an agent you already authenticated, and obvious secrets are redacted
   before they do.
@@ -210,17 +210,19 @@ It cannot be combined with
 
 ### 1. Collect samples - which sessions belong to this repo
 
-backpass reads the local transcript stores of seven harnesses directly. No API, no upload.
+backpass reads the local transcript stores of nine harnesses directly. No API, no upload.
 
-| Harness        | Store                                          | Repo tie                                            |
-| -------------- | ---------------------------------------------- | --------------------------------------------------- |
-| **claude**     | `~/.claude/projects/<munged-cwd>/<uuid>.jsonl` | per-line `cwd`                                      |
-| **codex**      | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `cwd` + recorded `git.repository_url`               |
-| **pi**         | standalone and BB-managed Pi JSONL stores      | session-header `cwd`                                |
-| **opencode**   | `~/.local/share/opencode/opencode.db` (sqlite) | `session.directory`                                 |
-| **grok**       | `~/.grok/sessions/<encoded-cwd>/<uuid>/`       | `summary.json` `cwd` + `git_remotes`                |
-| **cursor CLI** | `~/.cursor/chats/<md5(cwd)>/<uuid>/`           | `meta.json` `cwd`                                   |
-| **hermes**     | `~/.hermes/state.db` (sqlite)                  | session cwd, with CLI prompt / ACP config fallbacks |
+| Harness        | Store                                          | Repo tie                                              |
+| -------------- | ---------------------------------------------- | ----------------------------------------------------- |
+| **claude**     | `~/.claude/projects/<munged-cwd>/<uuid>.jsonl` | per-line `cwd`                                        |
+| **codex**      | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `cwd` + recorded `git.repository_url`                 |
+| **pi**         | standalone and BB-managed Pi JSONL stores      | session-header `cwd`                                  |
+| **opencode**   | `~/.local/share/opencode/opencode.db` (sqlite) | `session.directory`                                   |
+| **grok**       | `~/.grok/sessions/<encoded-cwd>/<uuid>/`       | `summary.json` `cwd` + `git_remotes`                  |
+| **cursor CLI** | `~/.cursor/chats/<md5(cwd)>/<uuid>/`           | `meta.json` `cwd`                                     |
+| **hermes**     | `~/.hermes/state.db` (sqlite)                  | session cwd, with CLI prompt / ACP config fallbacks   |
+| **jcode**      | `~/.jcode/sessions/*.json`                     | saved session `working_dir`                           |
+| **omp**        | `~/.omp/agent/sessions/**/*.jsonl`             | session record `cwd`; nested files are child sessions |
 
 Claude collection covers `$CLAUDE_CONFIG_DIR/projects` alongside the default store, so a
 relocated config dir does not hide its sessions. The variable is read from backpass's own
@@ -235,6 +237,10 @@ and reads each JSONL file once.
 
 Hermes collection includes CLI and ACP sessions only. Gateway, cron, and WhatsApp sessions
 are excluded because their recorded cwd belongs to the shared gateway process, not a project.
+
+Jcode collection reads canonical saved JSON sessions only. Backup files and journal JSONL
+files are not sessions. OMP collection is recursive because spawned sessions live below a
+parent session path. OMP remains separate from Pi so evidence provenance is preserved.
 
 Association runs in four tiers:
 
@@ -703,7 +709,7 @@ CLI flags on top:
     ]
   },
   "discovery": {
-    "harnesses": ["claude", "codex", "pi", "opencode", "grok", "cursor", "hermes"],
+    "harnesses": ["claude", "codex", "pi", "opencode", "grok", "cursor", "hermes", "jcode", "omp"],
     "since": "30d",
     "worktreeGlobs": [],
     "cloneRoots": [],

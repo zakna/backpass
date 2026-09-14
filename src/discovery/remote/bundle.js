@@ -32,6 +32,8 @@ export const PROBE_MANIFEST = [
   "discovery/adapters/grok.js",
   "discovery/adapters/opencode.js",
   "discovery/adapters/hermes.js",
+  "discovery/adapters/jcode.js",
+  "discovery/adapters/omp.js",
   "discovery/adapters/cursor-cli.js",
   "discovery/adapters/cursor-ide.js",
   "discovery/remote/frames.js",

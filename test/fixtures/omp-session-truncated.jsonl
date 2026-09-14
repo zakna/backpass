@@ -1,0 +1,4 @@
+{"type":"title","v":1,"title":"Truncated OMP session","source":"user"}
+{"type":"session","version":3,"id":"omp-truncated","timestamp":"2026-08-28T10:00:00.000Z","cwd":"/repo/demo"}
+{"type":"message","id":"message-1","timestamp":"2026-08-28T10:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"before truncation"}]}}
+{"type":"message","id":"message-2","message":{"role":"assistant","content":[{"type":"text","text":"incomplete"

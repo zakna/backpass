@@ -1,0 +1,46 @@
+{
+  "id": "jcode-123",
+  "working_dir": "/repo/demo",
+  "created_at": "2026-08-27T10:00:00.000Z",
+  "updated_at": "2026-08-27T10:05:00.000Z",
+  "model": "gpt-5.6-sol",
+  "provider_key": "openai-codex",
+  "title": "Parser maintenance",
+  "short_name": "parser",
+  "is_debug": true,
+  "is_canary": false,
+  "status": "Closed",
+  "parent_id": null,
+  "messages": [
+    {
+      "role": "system",
+      "content": [{"type": "text", "text": "system scaffolding"}]
+    },
+    {
+      "role": "user",
+      "content": [{"type": "text", "text": "Inspect the parser."}]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "reasoning_trace", "text": "internal reasoning"},
+        {"type": "text", "text": "I will read the parser."},
+        {"type": "tool_use", "id": "call-1", "name": "read", "input": {"path": "parser.js"}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "tool_result", "tool_use_id": "call-1", "content": "parser source", "is_error": false}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [{"type": "text", "text": "The parser is correct."}]
+    },
+    {
+      "role": "developer",
+      "content": [{"type": "text", "text": "developer scaffolding"}]
+    }
+  ]
+}

@@ -81,7 +81,7 @@ export function classifyInteraction(transcript) {
     return NON_INTERACTIVE;
   }
 
-  if (harness === "opencode" && signals.parentId) return NON_INTERACTIVE;
+  if ((harness === "opencode" || harness === "omp") && signals.parentId) return NON_INTERACTIVE;
 
   if (harness === "hermes") {
     const source = String(signals.source || transcript?.extra?.source || "").toLowerCase();
