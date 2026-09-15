@@ -3643,3 +3643,47 @@ test("a skill file that changed after the proposal refuses the apply; unchanged,
     /description: Load before touching the database\./,
   );
 });
+
+test("apply refuses to report an existing skill write that does not remain on disk", () => {
+  const skill = "---\nname: db\ndescription: old trigger\n---\n\nbody\n";
+  const built = gate({
+    files: { ".agents/skills/db/SKILL.md": skill },
+    edit: (root) =>
+      writeIn(root, ".agents/skills/db/SKILL.md", (text) =>
+        text.replace("old trigger", "Load before touching the database."),
+      ),
+    annotation: { edits: [claim(["H1"], { title: "fix the trigger" })] },
+  });
+  assert.deepEqual(built.violations, []);
+
+  const skillOnDisk = path.join(built.repo.root, ".agents/skills/db/SKILL.md");
+  const originalRename = fs.renameSync;
+  let replaced = false;
+  fs.renameSync = function replaceAfterSkillWrite(source, destination) {
+    const result = originalRename.call(this, source, destination);
+    if (!replaced && destination === skillOnDisk) {
+      replaced = true;
+      fs.writeFileSync(destination, skill);
+    }
+    return result;
+  };
+
+  let results;
+  try {
+    results = applyDecisions({
+      proposal: built.proposal,
+      decisions: { e1: "accepted" },
+      repo: built.repo,
+      state: built.state,
+      config: { budgetTokens: 5000 },
+    });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(replaced, true, "the test must exercise the skill replace boundary");
+  assert.equal(results.accepted, 0);
+  assert.deepEqual(results.written, []);
+  assert.match(results.failed[0].error, /could not be verified after writing/);
+  assert.equal(fs.readFileSync(skillOnDisk, "utf8"), skill, "the replacement is kept");
+});
