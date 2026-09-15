@@ -556,6 +556,7 @@ export function writeSkill(repoRoot, skill, { exclusive = false, ensureLayout = 
     fd = fs.openSync(target, "wx");
     ownership = [{ absolute: target, identity: pathIdentity(fs.fstatSync(fd)), relative: skill.path }];
     fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     ownership[0].text = text;
