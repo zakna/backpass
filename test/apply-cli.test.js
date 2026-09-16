@@ -258,6 +258,32 @@ test("an unchanged memory file applies every accepted edit and its skills", () =
   assert.equal(porcelain(dir).includes(".backpass"), false, "run state stays out of the working tree");
 });
 
+test("apply refuses to report a write after the target is replaced before completion", () => {
+  const dir = initRepo();
+  const proposal = proposeExtractions(dir);
+  const invocation = applyInvocation(
+    dir,
+    proposal.edits.map((edit) => edit.id),
+  );
+  invocation.args.unshift("--import", path.join(ROOT, "test/fixtures/revert-after-atomic-write.js"));
+  invocation.options.env = {
+    ...invocation.options.env,
+    BACKPASS_TEST_REVERT_TARGET: path.join(dir, "AGENTS.md"),
+    BACKPASS_TEST_REVERT_TEXT: MEMORY_TEXT,
+  };
+
+  const applied = spawnSync(process.execPath, invocation.args, invocation.options);
+
+  assert.equal(applied.status, 1, `apply should fail:\n${applied.stdout}${applied.stderr}`);
+  const output = `${applied.stdout}${applied.stderr}`;
+  assert.match(output, /0 accepted · 0 rejected/);
+  assert.match(output, /could not be verified after writing/);
+  assert.match(output, /nothing written/);
+  assert.equal(fs.readFileSync(path.join(dir, "AGENTS.md"), "utf8"), MEMORY_TEXT);
+  assert.equal(fs.existsSync(path.join(dir, ".agents")), false);
+  assert.equal(fs.existsSync(path.join(dir, ".claude")), false);
+});
+
 test("a symlinked memory file updates its target without replacing the link", () => {
   const dir = initRepo();
   const memory = path.join(dir, "AGENTS.md");
