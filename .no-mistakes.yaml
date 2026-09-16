@@ -1,0 +1,13 @@
+review:
+  path_instructions:
+    # backpass-transcript-access
+    - path: "src/*.js"
+      instructions: |
+        - Transcript content reaches a model only through the distilled, redacted trace or the bounded transcript inspector. When a change touches trace rendering, harness invocation, the inspector, or redaction, check that the raw transcript path, the inspector manifest, and unredacted content are not reachable by the model through its general file or shell tools, environment variables, or prompt text, and that the size and query caps cannot be bypassed that way.
+        - The prompt and its access mechanism must be chosen for the harness that actually runs. Trace an agent fallthrough in both directions (Pi to another harness, and another harness to Pi): no fallback may get an inspector-only prompt without the inspector, or an unbounded raw path where the bound applies.
+        - Prompt text must not tell the model to open a raw transcript that the current branch deliberately hides.
+    # backpass-evidence-identity
+    - path: "src/discovery/**"
+      instructions: |
+        - Evidence counts gate proposals (minGapEvidence distinct sessions), so one physical session must count once. When an adapter is added or its store resolution changes, check whether two harnesses can resolve to the same files (for example Pi and OMP through PI_CODING_AGENT_DIR) and whether identity then differs only by harness name.
+        - Backpass's own analysis and synthesis sessions must be excluded in every adapter's on-disk format; construct the self-session sentinel as that harness actually serializes it (whitespace, escaping, snapshot vs journal).
