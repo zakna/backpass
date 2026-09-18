@@ -147,6 +147,14 @@ list` only sees this clone. `attachSiblingClones` in `src/repo.js` also searches
   memory file; a later failure rolls back files, skills, and loading-layout entries created
   by the round. A rollback never overwrites a file whose identity or contents changed after
   this round committed it - that conflict is reported and the concurrent version is kept.
+  A second writer therefore has two correct outcomes, decided by which side of a file's
+  rename/read-back window it lands on: `could not be verified after writing` (nothing was
+  committed, so apply stops there) or `rollback conflict` (it was committed, so rollback
+  leaves it). Both write nothing and keep the other writer's bytes. That window is
+  microseconds wide, so a test must choose its interleaving from inside the apply process -
+  hook the rename through `--import` (`test/fixtures/concurrent-writer.js`,
+  `replace-before-skill-rollback.js`), never poll the file from the test process and write
+  when it looks ready. A poller picks an outcome at random and reads as a flake.
 - **Synthesis edits natively, in a staging copy, never by describing text.** The agent
   gets `--approve-all` with `cwd` = `.backpass/synthesis/` (`prepareWorkspace`), which holds
   only the memory file and the skills dir; backpass measures the copy (`measureWorkspace`,
