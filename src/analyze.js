@@ -272,6 +272,7 @@ export async function analyzeTranscripts({
   modelCwd = null,
   memoryHash,
   force = false,
+  prefetch = null,
 }) {
   const state = config.state;
   const pending = [];
@@ -299,6 +300,7 @@ export async function analyzeTranscripts({
     cwd: transcript.cwd || null,
     project: transcript.project || null,
     projectRoot: transcript.projectRoot || null,
+    host: transcript.host || null,
   });
 
   for (const transcript of transcripts) {
@@ -327,6 +329,11 @@ export async function analyzeTranscripts({
         `missing, and reuse resumes once this pass re-judges it against the current memory file and skill descriptions`,
     );
   }
+
+  // Remote sessions have no content here yet. Fetch exactly the pending ones, before the
+  // pool, so a cached or skipped transcript never costs an ssh call - and so an
+  // unreachable host fails one transcript at a time rather than mid-fan-out.
+  if (prefetch) await prefetch(pending);
 
   if (!pending.length) {
     emitProgress("analyze:start", { pending: 0, cached: summary.cached, total: transcripts.length, jobs: config.jobs });
