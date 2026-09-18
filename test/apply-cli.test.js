@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { buildProposal } from "../src/proposal.js";
@@ -181,17 +181,29 @@ function runApply(dir, editIds) {
   return { ...result, output: `${result.stdout}${result.stderr}` };
 }
 
-function runApplyAsync(dir, editIds) {
-  const { args, options } = applyInvocation(dir, editIds);
-  const child = spawn(process.execPath, args, options);
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => (stdout += chunk));
-  child.stderr.on("data", (chunk) => (stderr += chunk));
-  return new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (status, signal) => resolve({ status, signal, stdout, stderr, output: `${stdout}${stderr}` }));
-  });
+/**
+ * Run an apply with a second writer wired into one point of its write sequence. The
+ * concurrent write happens inside the apply process, at a rename the writer itself makes,
+ * so the interleaving under test is a fact rather than a race with a poller outside.
+ */
+function runApplyConcurrently(dir, edits, { onRename, when, writes, restore = () => {} }) {
+  const invocation = applyInvocation(
+    dir,
+    edits.map((edit) => edit.id),
+  );
+  invocation.args.unshift("--import", path.join(ROOT, "test/fixtures/concurrent-writer.js"));
+  invocation.options.env = {
+    ...invocation.options.env,
+    BACKPASS_TEST_CHANGE_ON_RENAME: onRename,
+    BACKPASS_TEST_CHANGE_WHEN: when,
+    BACKPASS_TEST_CHANGE_WRITES: JSON.stringify(writes),
+  };
+  try {
+    const result = spawnSync(process.execPath, invocation.args, invocation.options);
+    return { ...result, output: `${result.stdout}${result.stderr}` };
+  } finally {
+    restore();
+  }
 }
 
 const porcelain = (dir) => execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }).trim();
@@ -444,17 +456,21 @@ test("apply refuses accepted paths that resolve to the same target", () => {
   assert.equal(fs.existsSync(path.join(dir, ".agents")), false);
 });
 
-test("rollback leaves concurrently changed files and skills untouched", { timeout: 15000 }, async () => {
+/**
+ * The two interleavings a concurrent writer can produce, each pinned to one point in
+ * apply's write sequence so neither depends on timing. Both must leave the other writer's
+ * bytes alone and write nothing of their own; only the failure they report differs.
+ */
+test("rollback leaves concurrently changed files and skills untouched", () => {
   const dir = initRepo();
   const proposal = proposeExtractions(dir);
   const existing = path.join(dir, "existing.md");
   const concurrentSkill = path.join(dir, ".agents/skills/ci-details/SKILL.md");
-  const slow = path.join(dir, "slow.md");
+  const second = path.join(dir, "second.md");
   const lockedDir = path.join(dir, "locked");
-  const slowBefore = "a".repeat(8 * 1024 * 1024);
-  const slowAfter = "b".repeat(8 * 1024 * 1024);
+  const secondBefore = "second before\n";
   fs.writeFileSync(existing, "before\n");
-  fs.writeFileSync(slow, slowBefore);
+  fs.writeFileSync(second, secondBefore);
   fs.mkdirSync(lockedDir);
   fs.writeFileSync(path.join(lockedDir, "existing.md"), "locked before\n");
   proposal.edits.push(
@@ -468,9 +484,9 @@ test("rollback leaves concurrently changed files and skills untouched", { timeou
     {
       id: "e4",
       kind: "rewrite",
-      file: "slow.md",
-      find: slowBefore,
-      replace: slowAfter,
+      file: "second.md",
+      find: secondBefore,
+      replace: "second after\n",
     },
     {
       id: "e5",
@@ -483,32 +499,72 @@ test("rollback leaves concurrently changed files and skills untouched", { timeou
   fs.writeFileSync(path.join(dir, ".backpass/proposal.json"), JSON.stringify(proposal));
   fs.chmodSync(lockedDir, 0o555);
 
-  const applying = runApplyAsync(
-    dir,
-    proposal.edits.map((e) => e.id),
-  );
-  let changed = false;
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    if (fs.readFileSync(existing, "utf8") === "first write\n") {
-      fs.writeFileSync(existing, "concurrent write\n");
-      fs.writeFileSync(concurrentSkill, "concurrent skill write\n");
-      changed = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
+  // existing.md is written and verified first, second.md next, and locked/existing.md -
+  // in a directory nothing may write - fails last. Firing before second.md's rename puts
+  // the other writer past existing.md's verification, so it is a committed write that
+  // rollback has to find changed.
+  const applied = runApplyConcurrently(dir, proposal.edits, {
+    onRename: second,
+    when: "before",
+    writes: { [existing]: "concurrent write\n", [concurrentSkill]: "concurrent skill write\n" },
+    restore: () => fs.chmodSync(lockedDir, 0o755),
+  });
 
-  const applied = await applying;
-  fs.chmodSync(lockedDir, 0o755);
-  assert.equal(changed, true, `the apply never exposed its first committed file:\n${applied.output}`);
   assert.equal(applied.status, 1, `apply should fail:\n${applied.output}`);
   assert.match(applied.output, /existing\.md rollback conflict/);
   assert.match(applied.output, /ci-details\/SKILL\.md rollback conflict/);
   assert.equal(fs.readFileSync(existing, "utf8"), "concurrent write\n");
   assert.equal(fs.readFileSync(concurrentSkill, "utf8"), "concurrent skill write\n");
   assert.equal(fs.existsSync(path.join(dir, ".agents/skills/release-details/SKILL.md")), false);
-  assert.equal(fs.readFileSync(slow, "utf8"), slowBefore);
+  assert.equal(fs.readFileSync(second, "utf8"), secondBefore);
+});
+
+test("a write overtaken inside its own verification window is refused, not rolled back", () => {
+  const dir = initRepo();
+  const proposal = proposeExtractions(dir);
+  const memory = path.join(dir, "AGENTS.md");
+  const existing = path.join(dir, "existing.md");
+  const concurrentSkill = path.join(dir, ".agents/skills/ci-details/SKILL.md");
+  const second = path.join(dir, "second.md");
+  const secondBefore = "second before\n";
+  fs.writeFileSync(existing, "before\n");
+  fs.writeFileSync(second, secondBefore);
+  proposal.edits.push(
+    {
+      id: "e3",
+      kind: "rewrite",
+      file: "existing.md",
+      find: "before\n",
+      replace: "first write\n",
+    },
+    {
+      id: "e4",
+      kind: "rewrite",
+      file: "second.md",
+      find: secondBefore,
+      replace: "second after\n",
+    },
+  );
+  fs.writeFileSync(path.join(dir, ".backpass/proposal.json"), JSON.stringify(proposal));
+
+  // The same writer, one step earlier: between existing.md's rename and the read-back that
+  // proves it. Nothing is committed yet, so there is no file rollback to do - the write
+  // itself is what fails, and apply stops before it reaches second.md.
+  const applied = runApplyConcurrently(dir, proposal.edits, {
+    onRename: existing,
+    when: "after",
+    writes: { [existing]: "concurrent write\n", [concurrentSkill]: "concurrent skill write\n" },
+  });
+
+  assert.equal(applied.status, 1, `apply should fail:\n${applied.output}`);
+  assert.match(applied.output, /existing\.md could not be written: .*could not be verified after writing/);
+  assert.doesNotMatch(applied.output, /existing\.md rollback conflict/);
+  assert.match(applied.output, /ci-details\/SKILL\.md rollback conflict/);
+  assert.equal(fs.readFileSync(existing, "utf8"), "concurrent write\n", "the other writer's bytes stand");
+  assert.equal(fs.readFileSync(concurrentSkill, "utf8"), "concurrent skill write\n");
+  assert.equal(fs.existsSync(path.join(dir, ".agents/skills/release-details/SKILL.md")), false);
+  assert.equal(fs.readFileSync(second, "utf8"), secondBefore, "apply never reached the next file");
+  assert.equal(fs.readFileSync(memory, "utf8"), MEMORY_TEXT, "the memory file was never written");
 });
 
 test("skill rollback preserves a replacement made immediately before removal", () => {
