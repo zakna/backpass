@@ -23,6 +23,13 @@ evidence-backed edits to `AGENTS.md` / `CLAUDE.md` under a token budget.
 - pnpm is the package manager; `pnpm run check` runs lint, format:check, typecheck, and
   tests. All tests are offline and use fixtures under `test/fixtures/`. Supply-chain
   settings (release-age cooldown, build-script deny) live in `pnpm-workspace.yaml`.
+- **Tests must never read the machine's own user configuration.** The `test` script loads
+  `test/helpers/isolate-config.js` through `--import`, which `node --test` forwards to every
+  test file's child process, so `XDG_CONFIG_HOME` points at an empty temp dir before any test
+  module or spawned CLI resolves `userConfigPath()`. Run one file the same way, never bare
+  `node --test test/x.test.js`: without it a developer's `~/.config/backpass/config.json`
+  becomes a silent layer under `loadConfig` and the suite is green only on a machine that has
+  no configuration.
 - Releases are automated by release-please (`.github/workflows/release-please.yml`,
   npm trusted publishing). Never hand-edit `CHANGELOG.md` or
   `.release-please-manifest.json`; CI guards reject PRs that touch them.
