@@ -14,6 +14,7 @@ import {
   ensureSkillsLayout,
   loadProjectSkills,
   loadedCopies,
+  logicalSkillDir,
   parseFrontmatter,
   removeOwnedSkillPaths,
   resolveOverflowTarget,
@@ -182,7 +183,15 @@ function atomicReplace(target, text) {
     fs.closeSync(fd);
     fd = undefined;
     fs.renameSync(temp, target);
-    return { absolute: target, identity: ownership[0].identity, text };
+    // A successful rename is not enough: another writer can replace the target before
+    // apply reports success. Verify both the exact filesystem object and its bytes.
+    const commit = { absolute: target, identity: ownership[0].identity, text };
+    if (!commitStillCurrent(commit)) {
+      throw Object.assign(new Error(`${target} could not be verified after writing`), {
+        code: "BACKPASS_WRITE_NOT_VERIFIED",
+      });
+    }
+    return commit;
   } catch (err) {
     if (fd !== undefined) {
       try {
@@ -243,7 +252,8 @@ function removeEmptyDirectories(directories) {
  * paths must resolve to distinct targets. Any failure writes nothing and records no rejection.
  *
  * A file is therefore applied all at once or not at all. Skills are written only after
- * every accepted edit has composed, and before the files that reference them.
+ * every accepted edit has composed, and before the files that reference them. A write is
+ * reported only after the target still has the exact object and bytes that were written.
  */
 export function applyDecisions({ proposal, decisions, repo, state, config, dryRun = false }) {
   const accepted = proposal.edits.filter((e) => decisions[e.id] === "accepted");
@@ -259,6 +269,12 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
     rejected: rejected.length,
     rejectionsRecorded: false,
   };
+  const finish = () => {
+    // A reviewer accepted these edits, but a failed write did not. Keep the result
+    // truthful so the CLI cannot turn a failed apply into a false success count.
+    if (results.failed.length) results.accepted = 0;
+    return results;
+  };
 
   if ((proposal.scope || "project") === "project") {
     const targets = new Set([
@@ -270,7 +286,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       for (const target of targets) if (target) resolveMemoryPath(repo.root, target);
     } catch (err) {
       results.failed.push({ error: err.message });
-      return results;
+      return finish();
     }
   }
 
@@ -279,7 +295,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
     const snapshot = memoryFileSnapshot(proposal, repo);
     if (snapshot.failure) {
       results.failed.push(snapshot.failure);
-      return results;
+      return finish();
     }
     memoryText = snapshot.text;
   }
@@ -331,7 +347,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       }
     }
   }
-  if (results.failed.length) return results;
+  if (results.failed.length) return finish();
 
   for (const edit of accepted) {
     for (const relative of filesOfEdit(edit)) {
@@ -413,7 +429,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
     resolvedPlanned.push(resolvedItem);
   }
 
-  if (results.failed.length) return results;
+  if (results.failed.length) return finish();
 
   // Skills go in before the memory file. A skill nothing points at yet is inert, while a
   // memory file pointing at a skill that is not there is actively wrong - so if a skill
@@ -435,7 +451,25 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       plannedSkills.push({ edit, skill });
     }
   }
-  if (results.failed.length) return results;
+  if (results.failed.length) return finish();
+
+  // Skill paths were frozen into the proposal at propose time under whatever skillsDir
+  // was configured then; writing them now under a different one would silently ignore
+  // the current run's --skills-dir instead of writing where it says. Refuse rather than
+  // remap - a later apply should re-propose against the new location.
+  const proposedSkillsDir = proposal.config?.skillsDir;
+  const currentSkillsDir = config.skillsDir || CANONICAL_SKILLS_DIR;
+  const skillsDirMismatch =
+    proposedSkillsDir && logicalSkillDir(repo.root, proposedSkillsDir) !== logicalSkillDir(repo.root, currentSkillsDir);
+  if (plannedSkills.length && skillsDirMismatch) {
+    results.failed.push({
+      error:
+        `this proposal was generated with skillsDir=${proposedSkillsDir}; the current run is configured ` +
+        `with skillsDir=${currentSkillsDir} - re-run \`backpass propose\` with the new skillsDir, or apply ` +
+        "without overriding it",
+    });
+    return results;
+  }
 
   const existingSkillPaths = new Set(skillsNow.map((skill) => skill.path));
   let descriptionTokensProjected = descriptionTokensNow;
@@ -461,7 +495,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
     });
     if (budgetFailure) {
       results.failed.push(budgetFailure);
-      return results;
+      return finish();
     }
   }
 
@@ -479,10 +513,16 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       const layout = dryRun
         ? { created: [], warnings: [] }
         : writeSkill(repo.root, skill, { exclusive: true, ensureLayout: false });
-      results.skills.push({ path: skill.path, dryRun, created: layout.created });
       if (!dryRun) {
-        ownedSkillPaths.push(...("ownership" in layout && Array.isArray(layout.ownership) ? layout.ownership : []));
+        const ownership = "ownership" in layout && Array.isArray(layout.ownership) ? layout.ownership : [];
+        ownedSkillPaths.push(...ownership);
+        if (ownership.some((commit) => !commitStillCurrent(commit))) {
+          throw Object.assign(new Error(`${skill.path} could not be verified after writing`), {
+            code: "BACKPASS_WRITE_NOT_VERIFIED",
+          });
+        }
       }
+      results.skills.push({ path: skill.path, dryRun, created: layout.created });
       for (const w of layout.warnings) if (!results.warnings.includes(w)) results.warnings.push(w);
     } catch (err) {
       skillFailures.push({ file: skill.path, edit: edit.id, error: err.message });
@@ -516,7 +556,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
         error: `${relative} was left unchanged: its edits point at a skill that could not be written`,
       });
     }
-    return results;
+    return finish();
   }
 
   const orderedPlanned = [...resolvedPlanned].sort((a, b) => {
@@ -568,7 +608,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       });
       rollbackCommitted();
       rollbackSkills();
-      return results;
+      return finish();
     }
     committed.push({ ...item, commit });
     results.written.push({ file: relative, edits: applied, budget, dryRun });
@@ -596,7 +636,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
       results.failed.push({ file: claudeSkillsLink, edit: canonical.edit.id, error: err.message });
       rollbackCommitted();
       rollbackSkills();
-      return results;
+      return finish();
     }
   }
 
@@ -608,7 +648,7 @@ export function applyDecisions({ proposal, decisions, repo, state, config, dryRu
     results.rejectionsRecorded = true;
   }
 
-  return results;
+  return finish();
 }
 
 /**

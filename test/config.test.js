@@ -50,11 +50,15 @@ test("the defaults match the approved design", () => {
   );
 });
 
-test("project initialization seeds the fork's personal model and harness profile", () => {
+test("project initialization seeds the fork's harness profile", () => {
   const config = initialConfig();
-  assert.deepEqual(config.analysis, { agent: "codex", model: "gpt-5.6-luna", effort: "max" });
-  assert.deepEqual(config.synthesis, { agent: "codex", model: "gpt-5.6-luna", effort: "max" });
   assert.deepEqual(config.discovery.harnesses, ["claude", "codex", "jcode", "pi", "omp"]);
+});
+
+test("project initialization writes no role blocks, so global agent pins survive init", () => {
+  const config = initialConfig();
+  assert.equal("analysis" in config, false);
+  assert.equal("synthesis" in config, false);
 });
 
 test("a model without an agent is rejected rather than half-auto-picked", () => {
@@ -102,6 +106,25 @@ test("repo config overrides defaults, and CLI flags override both", () => {
   assert.equal(withFlags.budgetTokens, 8000);
   assert.equal(withFlags.analysis.agent, "pi", "a nested flag override merges, it does not replace");
   assert.equal(withFlags.analysis.model, "gpt-5.2");
+});
+
+test("repo null explicitly overrides a global agent pin with auto-pick", () => {
+  const configHome = fs.mkdtempSync(path.join(os.tmpdir(), "backpass-config-global-pin-"));
+  const repo = tempRepo({ analysis: { agent: null, model: null, effort: null } });
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = configHome;
+  fs.mkdirSync(path.join(configHome, "backpass"), { recursive: true });
+  fs.writeFileSync(
+    path.join(configHome, "backpass", "config.json"),
+    JSON.stringify({ analysis: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } }),
+  );
+
+  try {
+    assert.deepEqual(loadConfig(repo).analysis, { agent: null, model: null, effort: null, tools: null });
+  } finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+  }
 });
 
 test("skillsDir is normalized when the configuration loads", () => {

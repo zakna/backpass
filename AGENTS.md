@@ -23,6 +23,13 @@ evidence-backed edits to `AGENTS.md` / `CLAUDE.md` under a token budget.
 - pnpm is the package manager; `pnpm run check` runs lint, format:check, typecheck, and
   tests. All tests are offline and use fixtures under `test/fixtures/`. Supply-chain
   settings (release-age cooldown, build-script deny) live in `pnpm-workspace.yaml`.
+- **Tests must never read the machine's own user configuration.** The `test` script loads
+  `test/helpers/isolate-config.js` through `--import`, which `node --test` forwards to every
+  test file's child process, so `XDG_CONFIG_HOME` points at an empty temp dir before any test
+  module or spawned CLI resolves `userConfigPath()`. Run one file the same way, never bare
+  `node --test test/x.test.js`: without it a developer's `~/.config/backpass/config.json`
+  becomes a silent layer under `loadConfig` and the suite is green only on a machine that has
+  no configuration.
 - Releases are automated by release-please (`.github/workflows/release-please.yml`,
   npm trusted publishing). Never hand-edit `CHANGELOG.md` or
   `.release-please-manifest.json`; CI guards reject PRs that touch them.
@@ -49,6 +56,36 @@ evidence-backed edits to `AGENTS.md` / `CLAUDE.md` under a token budget.
   under audit, so analysis, evidence, hashes, and the always-loaded budget are unchanged;
   only staging (`stagedSkills` in `prepareWorkspace`) and the `buildProposal` gate narrow.
   `TARGET_COMMANDS` lists where the flag applies; everything else rejects it.
+- **SSH hosts are a collection tier, not a second scope.** `src/discovery/hosts.js` runs
+  three remote commands per configured host - locate Node/git, probe `discover`, probe
+  `fetch` - over one explicit ControlMaster that is opened before locate and closed after
+  fetch or at command teardown; the descriptors join the one corpus with the same tiers, sample and
+  cap. `src/discovery/remote/ssh.js` is the sole ssh spawn boundary (constant option set,
+  destination/node-path refusal, `classifySshFailure`, `BACKPASS_SSH_BIN`), and a Windows
+  shim refusal must be raised by name there like every other spawn. Nothing installs on
+  the remote: `src/discovery/remote/bundle.js` ships `PROBE_MANIFEST` plus the request as
+  one stdin program, so a stray import in a manifest module breaks every host at once -
+  `test/remote-bundle.test.js` runs the probe from a directory holding only the manifest.
+  The payload never reaches the remote shell; the refused node path is the only variable
+  command text and is single-quoted. The locate snippet and loader bodies carry no single
+  quote, backslash, or `!`. Remote tiers have no tier 1
+  (nothing over there is this clone); facts come from `remote/git-facts.js`, computed
+  where the paths are real, and `associateRemote` applies the local rules to them. Hosts
+  are personal configuration: `discovery.hosts` in `.backpassrc.json` is a `UserError` by
+  construction, which is what keeps the feature inside VISION's "never someone else's
+  transcripts". Every host is fail-soft with a named message; host keys are never
+  auto-accepted and `StrictHostKeyChecking=no` is never suggested.
+- **A remote session's content is fetched, cached, and read through the same adapter.**
+  `prefetchRemoteTranscripts` runs before the analysis pool for exactly the pending
+  sampled transcripts. File-backed stores send the raw file so `rawPath` still names a
+  real local file and the analysis escape hatch survives the trip; SQLite stores send the
+  adapter's events, since there is no per-session file. `src/discovery/cache.js` hashes
+  (host, harness, key) into a name so an untrusted remote path can never steer a write,
+  writes tmp+rename, and prunes at 30 days unused. A short frame fails that one transcript
+  with `remote fetch incomplete` and refetches next run - never a truncated session
+  analyzed as a whole one. Identity is `ssh://<host>/<path>` (`transcriptSource`), evidence
+  labels carry the host (`gapSource`), and one session present on two machines is kept
+  once, local copy first.
 - **Sibling clones are a live-path tier, not a recorded-remote one.** `git worktree
 list` only sees this clone. `attachSiblingClones` in `src/repo.js` also searches the
   parent of each worktree (and `discovery.cloneRoots`) for other checkouts that share a
@@ -99,13 +136,25 @@ list` only sees this clone. `attachSiblingClones` in `src/repo.js` also searches
   every non-memory edit target still hashes to its `proposal.targetFiles` entry (same
   contract, so a hand-edited skill refuses the apply instead of being patched blind), the
   accepted subset clears `budgetGateKind` (`src/tokens.js`), every accepted edit for a file
-  composes against that file's one pre-write image, and every created skill target is still
-  absent. Any of them failing writes nothing and records no rejection. Accepted paths are
+  composes against that file's one pre-write image, every created skill target is still
+  absent, and, when the proposal carries any skill writes, the current run's resolved
+  `skillsDir` (defaulting to the canonical skills dir when unset) still matches
+  `proposal.config.skillsDir` - a mismatch refuses the apply naming both values rather than
+  writing to the stale propose-time path. Any of them failing writes nothing and records no
+  rejection. Accepted paths are
   resolved before mutation, and duplicate resolved targets refuse the whole apply. Each file
   is therefore applied whole or not at all. Skills and non-memory files land before the
   memory file; a later failure rolls back files, skills, and loading-layout entries created
   by the round. A rollback never overwrites a file whose identity or contents changed after
   this round committed it - that conflict is reported and the concurrent version is kept.
+  A second writer therefore has two correct outcomes, decided by which side of a file's
+  rename/read-back window it lands on: `could not be verified after writing` (nothing was
+  committed, so apply stops there) or `rollback conflict` (it was committed, so rollback
+  leaves it). Both write nothing and keep the other writer's bytes. That window is
+  microseconds wide, so a test must choose its interleaving from inside the apply process -
+  hook the rename through `--import` (`test/fixtures/concurrent-writer.js`,
+  `replace-before-skill-rollback.js`), never poll the file from the test process and write
+  when it looks ready. A poller picks an outcome at random and reads as a flake.
 - **Synthesis edits natively, in a staging copy, never by describing text.** The agent
   gets `--approve-all` with `cwd` = `.backpass/synthesis/` (`prepareWorkspace`), which holds
   only the memory file and the skills dir; backpass measures the copy (`measureWorkspace`,
@@ -132,7 +181,15 @@ list` only sees this clone. `attachSiblingClones` in `src/repo.js` also searches
   call, so an empty-only failure cannot leave an older proposal applicable.
   `synthesisFailureHint` in `src/commands/propose.js` is
   where the advice for each terminal condition lives - never a blanket
-  stronger-model/budget/max-edits line.
+  stronger-model/budget/max-edits line. A blank or unparseable first annotate turn is
+  reported as `edit-empty`, not the generic `empty`/`unparseable` reason, when the edit
+  turn left the staging copy and all in-scope files byte-identical to the original - a
+  stray out-of-scope write counts as touched, so it is never hidden behind `edit-empty` -
+  there was nothing to annotate, so retrying burns no attempts. That check only fires on the loop's first turn;
+  a later turn's empty diff still means the model undid its own edit mid-annotation, which
+  stays `editing`/`empty`/`unparseable`. It never overrides a _parseable_ answer, even
+  `{edits: []}`, because an agent that changed nothing yielding an empty proposal is a
+  success, not a failure (`VISION.md`).
 - **An extract is one measured memory change plus the skill(s) it pays for.** `anchoredHunks`
   merges adjacent removals, so extracting neighbouring sections yields one change and N
   skills - one honest accept/reject decision, since a merged change cannot be

@@ -155,7 +155,6 @@ function sessionCreateTimeoutError({ agent, acpxAgentArgs, timeoutMs }) {
  */
 export function classifyAcpxFailure(failure) {
   if (!failure) return null;
-  if (failure.emptyOutput) return "empty-output";
   if (failure.spawnError?.code === "ENOENT") return "unreachable";
   const text = failure.stderr || "";
   if (/AUTH_REQUIRED|authentication required/i.test(text)) return "unauthenticated";
@@ -163,6 +162,9 @@ export function classifyAcpxFailure(failure) {
   if (/\b(ENOENT|command not found|not found on PATH|failed to spawn|spawn .* ENOENT)\b/i.test(text)) {
     return "unreachable";
   }
+  // Checked last: a non-empty stderr that matches one of the patterns above is a more
+  // specific diagnosis than "no output", and must not be shadowed by it.
+  if (failure.emptyOutput) return "empty-output";
   return null;
 }
 
@@ -243,13 +245,17 @@ export function isBlankOutput(text) {
  * deliberately never switches agents mid-session - see `src/synthesize.js`. Both stay
  * on `isBlankOutput` directly instead.
  *
- * @param {{ text: string, raw?: string }} result
+ * @param {{ text: string, raw?: string, stderr?: string }} result
  * @param {{ agent: string, model?: string | null }} pick
  */
 export function assertNonEmptyOutput(result, { agent, model }) {
   if (!isBlankOutput(result.text)) return result;
   throw new AcpxError(`${agent} (${model || "default"}) returned no output`, {
     stdout: result.raw ?? result.text,
+    // Even when the call itself is unclassifiable beyond "empty-output", a non-empty
+    // stderr is real diagnostic text (e.g. a provider error an ACP bridge otherwise
+    // swallows) and must reach the caller rather than being dropped here.
+    stderr: result.stderr || "",
     emptyOutput: true,
   });
 }
@@ -415,6 +421,7 @@ export async function execOneShot({
   model = null,
   effort = null,
   tools = null,
+  transcriptInspector = null,
   promptFile,
   cwd,
   timeoutSeconds = 300,
@@ -422,7 +429,7 @@ export async function execOneShot({
   approveReads = true,
   suppressReads = true,
 }) {
-  const invocation = prepareHarnessInvocation({ agent, model, effort, tools });
+  const invocation = prepareHarnessInvocation({ agent, model, effort, tools, transcriptInspector });
   const args = [
     ...baseArgs({ cwd, model: invocation.acpxModel, timeoutSeconds, approveReads, suppressReads }),
     "--prompt-retries",
@@ -456,7 +463,13 @@ export async function execOneShot({
 
     const combined = `${result.stdout}\n${result.stderr}`;
     const usage = parseTokenLine(combined) ?? recoverUsageFromStore({ agent, promptFile, cwd, startedAt });
-    return { text: stripAcpxNoise(result.stdout), usage, raw: result.stdout, notes: invocation.notes };
+    return {
+      text: stripAcpxNoise(result.stdout),
+      usage,
+      raw: result.stdout,
+      stderr: result.stderr,
+      notes: invocation.notes,
+    };
   } finally {
     invocation.dispose();
   }
@@ -488,12 +501,20 @@ export async function openSession({
   model = null,
   effort = null,
   tools = null,
+  transcriptInspector = null,
   sessionName,
   cwd,
   writeAccess = false,
   createTimeoutMs = SESSION_CREATE_TIMEOUT_MS,
 }) {
-  const invocation = prepareHarnessInvocation({ agent, model, effort, tools, writeAccess });
+  const invocation = prepareHarnessInvocation({
+    agent,
+    model,
+    effort,
+    tools,
+    transcriptInspector,
+    writeAccess,
+  });
   const notes = [...invocation.notes];
   const acpxAgentArgs = invocationAgentArgs(invocation, agent);
   // The adapter is already up once the session exists, so the later `set` calls do not
@@ -638,7 +659,7 @@ export async function openSession({
       usage = cumulative ? subtractUsage(cumulative, storeUsageSeen) : null;
       if (cumulative) storeUsageSeen = cumulative;
     }
-    return { text: stripAcpxNoise(result.stdout), usage, raw: result.stdout, notes };
+    return { text: stripAcpxNoise(result.stdout), usage, raw: result.stdout, stderr: result.stderr, notes };
   };
 
   return { notes, prompt, close };
@@ -664,6 +685,7 @@ export async function sessionPrompt({
   model = null,
   effort = null,
   tools = null,
+  transcriptInspector = null,
   sessionName,
   promptFile,
   cwd,
@@ -675,7 +697,16 @@ export async function sessionPrompt({
 }) {
   let session;
   try {
-    session = await openSession({ agent, model, effort, tools, sessionName, cwd, createTimeoutMs });
+    session = await openSession({
+      agent,
+      model,
+      effort,
+      tools,
+      transcriptInspector,
+      sessionName,
+      cwd,
+      createTimeoutMs,
+    });
   } catch (err) {
     if (!(err instanceof AcpxError) || !err.unsupported) throw err;
     if (effort && effortOptionKey(agent)) {
@@ -696,6 +727,7 @@ export async function sessionPrompt({
       approveReads,
       suppressReads,
       tools,
+      transcriptInspector,
     });
     return { ...fallback, notes };
   }

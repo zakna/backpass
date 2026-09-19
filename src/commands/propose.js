@@ -9,10 +9,11 @@ import { budgetBar, formatTokens } from "../tokens.js";
 import { emitProgress } from "../progress.js";
 import { primaryMemoryFile } from "./analyze.js";
 import { printUsage } from "./usage.js";
-import { discoverForRun } from "./scan.js";
+import { closeRemoteDiscovery, discoverForRun } from "./scan.js";
 import { capTranscripts } from "../sample.js";
 import { isEvidenceFresh } from "../state.js";
 import { transcriptIdentity } from "../transcript.js";
+import { pruneHostCache } from "../discovery/cache.js";
 
 /**
  * Fold on-disk evidence for the memory surface. Gap sightings persist across runs, but
@@ -98,6 +99,15 @@ export function accountForConsolidationUsage(proposal, summary) {
 }
 
 export async function runProposal(ctx, precomputed = null) {
+  try {
+    return await runProposalCore(ctx, precomputed);
+  } finally {
+    await closeRemoteDiscovery(ctx);
+    pruneHostCache(ctx.config.state.root);
+  }
+}
+
+async function runProposalCore(ctx, precomputed) {
   const { repo, config } = ctx;
   // Starting a new proposal run invalidates the previous result immediately. Discovery,
   // folding, and agent resolution can all fail before synthesis starts; none of those
@@ -209,6 +219,9 @@ export function synthesisFailureHint(err) {
   }
   if (err.reason === "editing") {
     return "the agent kept rewriting the staging copy instead of describing it; run `backpass propose` again to start fresh";
+  }
+  if (err.reason === "edit-empty") {
+    return "the edit turn made no changes to the staging copy, so there was nothing for the annotation turn to describe; run `backpass propose` again, or pin a different harness with --synthesis-agent";
   }
   const violations = err.violations || [];
   if (violations.some(isBudgetViolation)) {

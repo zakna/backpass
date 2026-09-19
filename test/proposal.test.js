@@ -2090,6 +2090,78 @@ test("an accepted extract writes the skill the agent drafted, in the canonical l
   assert.ok(fs.readFileSync(path.join(repo.root, "AGENTS.md"), "utf8").includes("See the release-signing skill."));
 });
 
+test("apply refuses a skillsDir that disagrees with the one baked into the proposal, rather than writing to the stale path", () => {
+  const skillText =
+    "---\nname: release-signing\ndescription: Load before tagging a release.\n---\n\n- Use Node 18 via nvm before running any script.\n\n## Steps\n\n1. sign\n";
+  const { proposal, repo, state } = gate({
+    edit: (root) => {
+      writeIn(root, "AGENTS.md", (t) =>
+        t.replace("- Use Node 18 via nvm before running any script.", "- See the release-signing skill."),
+      );
+      writeIn(root, ".agents/skills/release-signing/SKILL.md", skillText);
+    },
+    annotation: { edits: [claim(["H1", "H2"], { kind: "extract", title: "x" })] },
+  });
+  assert.equal(proposal.config.skillsDir, ".agents/skills");
+
+  const results = applyDecisions({
+    proposal,
+    decisions: { e1: "accepted" },
+    repo,
+    state,
+    config: { budgetTokens: 5000, skillsDir: "other/skills" },
+  });
+
+  assert.equal(results.written.length, 0, "a refused apply must write nothing");
+  assert.ok(
+    results.failed.some((f) => /skillsDir=\.agents\/skills/.test(f.error) && /skillsDir=other\/skills/.test(f.error)),
+    `expected a named skillsDir mismatch, got ${JSON.stringify(results.failed)}`,
+  );
+  assert.ok(
+    !fs.existsSync(path.join(repo.root, ".agents/skills/release-signing/SKILL.md")),
+    "nothing lands at the stale propose-time path",
+  );
+  assert.ok(
+    !fs.existsSync(path.join(repo.root, "other/skills/release-signing/SKILL.md")),
+    "nothing lands at the newly configured path either - a mismatch is refused, never remapped",
+  );
+  assert.equal(
+    fs.readFileSync(path.join(repo.root, "AGENTS.md"), "utf8"),
+    MEMORY_TEXT,
+    "a refused apply must leave the memory file untouched",
+  );
+});
+
+test("apply accepts a skillsDir spelled differently but naming the same directory as the proposal", () => {
+  const skillText =
+    "---\nname: release-signing\ndescription: Load before tagging a release.\n---\n\n- Use Node 18 via nvm before running any script.\n\n## Steps\n\n1. sign\n";
+  const { proposal, repo, state } = gate({
+    edit: (root) => {
+      writeIn(root, "AGENTS.md", (t) =>
+        t.replace("- Use Node 18 via nvm before running any script.", "- See the release-signing skill."),
+      );
+      writeIn(root, ".agents/skills/release-signing/SKILL.md", skillText);
+    },
+    annotation: { edits: [claim(["H1", "H2"], { kind: "extract", title: "x" })] },
+  });
+  assert.equal(proposal.config.skillsDir, ".agents/skills");
+
+  const results = applyDecisions({
+    proposal,
+    decisions: { e1: "accepted" },
+    repo,
+    state,
+    config: { budgetTokens: 5000, skillsDir: "./.agents/skills" },
+  });
+
+  assert.equal(
+    results.failed.length,
+    0,
+    `an equivalent spelling must not be refused: ${JSON.stringify(results.failed)}`,
+  );
+  assert.ok(fs.existsSync(path.join(repo.root, ".agents/skills/release-signing/SKILL.md")));
+});
+
 test("a dry run reports what it would write without touching the file", () => {
   const { proposal, repo, state } = gate({
     edit: memoryEdit((t) => t.replace("- Use Node 18 via nvm before running any script.\n", "")),
@@ -3642,4 +3714,48 @@ test("a skill file that changed after the proposal refuses the apply; unchanged,
     fs.readFileSync(path.join(fresh.repo.root, ".agents/skills/db/SKILL.md"), "utf8"),
     /description: Load before touching the database\./,
   );
+});
+
+test("apply refuses to report an existing skill write that does not remain on disk", () => {
+  const skill = "---\nname: db\ndescription: old trigger\n---\n\nbody\n";
+  const built = gate({
+    files: { ".agents/skills/db/SKILL.md": skill },
+    edit: (root) =>
+      writeIn(root, ".agents/skills/db/SKILL.md", (text) =>
+        text.replace("old trigger", "Load before touching the database."),
+      ),
+    annotation: { edits: [claim(["H1"], { title: "fix the trigger" })] },
+  });
+  assert.deepEqual(built.violations, []);
+
+  const skillOnDisk = path.join(built.repo.root, ".agents/skills/db/SKILL.md");
+  const originalRename = fs.renameSync;
+  let replaced = false;
+  fs.renameSync = function replaceAfterSkillWrite(source, destination) {
+    const result = originalRename.call(this, source, destination);
+    if (!replaced && destination === skillOnDisk) {
+      replaced = true;
+      fs.writeFileSync(destination, skill);
+    }
+    return result;
+  };
+
+  let results;
+  try {
+    results = applyDecisions({
+      proposal: built.proposal,
+      decisions: { e1: "accepted" },
+      repo: built.repo,
+      state: built.state,
+      config: { budgetTokens: 5000 },
+    });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(replaced, true, "the test must exercise the skill replace boundary");
+  assert.equal(results.accepted, 0);
+  assert.deepEqual(results.written, []);
+  assert.match(results.failed[0].error, /could not be verified after writing/);
+  assert.equal(fs.readFileSync(skillOnDisk, "utf8"), skill, "the replacement is kept");
 });

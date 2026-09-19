@@ -22,7 +22,7 @@ import { estimateTokens } from "./tokens.js";
 
 export const BROAD_RELEVANCE_THRESHOLD = 0.2;
 
-function logicalSkillDir(repoRoot, skillsDir) {
+export function logicalSkillDir(repoRoot, skillsDir) {
   const absolute = path.isAbsolute(skillsDir) ? skillsDir : path.resolve(repoRoot, skillsDir);
   const relative = path.relative(path.resolve(repoRoot), absolute);
   if (relative === "") return ".";
@@ -556,6 +556,7 @@ export function writeSkill(repoRoot, skill, { exclusive = false, ensureLayout = 
     fd = fs.openSync(target, "wx");
     ownership = [{ absolute: target, identity: pathIdentity(fs.fstatSync(fd)), relative: skill.path }];
     fs.writeFileSync(fd, text);
+    fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
     ownership[0].text = text;
