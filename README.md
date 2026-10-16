@@ -880,7 +880,9 @@ It only reports: findings and a red quality gate never fail it. Without
 `SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
 tests fail. The token is handed to `sonar-scanner` alone, never to the tests
 or the other tools. A detached HEAD is not uploaded unless `SONAR_BRANCH`
-names its branch, so it cannot overwrite `main`'s results.
+names its branch, so it cannot overwrite `main`'s results. A scan without the
+OSV-Scanner or the Stryker report (including `STRYKER_MODE=off`) is not
+uploaded either: SonarQube would mark the issues it last saw as fixed.
 
 Results appear at <http://192.168.42.33:9001/dashboard?id=zakna_backpass>
 (LAN or Tailscale only); a branch other than `main` is analysed as its own

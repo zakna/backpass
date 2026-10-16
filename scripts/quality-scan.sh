@@ -45,6 +45,11 @@ mkdir -p "$OUT" "$TOOLS"
 
 say() { printf '==> %s\n' "$*"; }
 
+# SonarQube closes every external issue an analysis does not report again, so
+# a scan missing the OSV or the mutation report is never uploaded: that would
+# mark the previous findings fixed. `incomplete` names what is missing.
+incomplete=
+
 # tool NAME PACKAGE VERSION: print the path of a pinned Go tool, building it
 # into .cache/quality-tools on first use.
 tool() {
@@ -96,16 +101,26 @@ if osv=$(tool osv-scanner github.com/google/osv-scanner/v2/cmd/osv-scanner v2.7.
 else
   say "OSV-Scanner: skipped (could not build it; needs Go)"
 fi
+[ -s "$OUT/osv.sarif" ] || incomplete="no OSV-Scanner report"
+
 
 # --- 3. mutation testing ----------------------------------------------------
 stryker() {
   local args=()
   if [ "$MODE" = off ]; then
     say "Stryker: skipped (STRYKER_MODE=off)"
+    incomplete="STRYKER_MODE=off"
     return
   elif [ "$MODE" = full ]; then
-    # Incremental: a rerun only retests mutants whose code or tests changed.
-    args=(--incremental)
+    # Incremental: a rerun only retests mutants whose code or test file
+    # changed. Stryker cannot see any other input, so the results file is
+    # keyed by a hash of the config, test helpers, fixtures and dependencies;
+    # changing any of them starts a fresh full run.
+    local key
+    key=$(git ls-files -z -co --exclude-standard -- stryker.config.mjs package.json pnpm-lock.yaml \
+      test/helpers test/fixtures | sort -z | xargs -0 cat | git hash-object --stdin | cut -c1-12)
+    find .cache/stryker -name 'incremental-*.json' ! -name "incremental-$key.json" -delete 2>/dev/null
+    args=(--incremental --incrementalFile ".cache/stryker/incremental-$key.json")
     say "Stryker (full run of src/, bin/ and scripts/)"
   else
     local ref=${STRYKER_DIFF_REF:-} base files
@@ -118,6 +133,8 @@ stryker() {
     files=$(git diff --name-only --diff-filter=d "$ref" -- 'src/*.js' 'bin/*.js' 'scripts/*.js' | paste -sd, -)
     if [ -z "$files" ]; then
       say "Stryker: skipped (no src/, bin/ or scripts/ file changed since $ref)"
+      # Nothing to mutate is a complete result: no mutant issues.
+      printf '{"rules":[],"issues":[]}\n' >"$OUT/sonar-mutants.json"
       return
     fi
     args=(--mutate "$files")
@@ -135,6 +152,8 @@ stryker() {
   else
     say "Stryker: no report, see $OUT/stryker.log"
   fi
+  [ -s "$OUT/sonar-mutants.json" ] || incomplete="no Stryker report"
+
 }
 stryker
 
@@ -148,6 +167,10 @@ sonar() {
     say "SonarQube: skipped (sonar-scanner is not installed)"
     return
   fi
+  if [ -n "$incomplete" ]; then
+    say "SonarQube: skipped ($incomplete; uploading would close the issues it last reported)"
+    return
+  fi
   if [ -z "$BRANCH" ]; then
     say "SonarQube: skipped (detached HEAD; set SONAR_BRANCH to name the branch)"
     return
@@ -157,17 +180,10 @@ sonar() {
     return
   fi
 
-  local props=()
-  if [ -s "$OUT/osv.sarif" ]; then
-    props+=("-Dsonar.sarifReportPaths=$OUT/osv.sarif")
-  else
-    props+=("-Dsonar.sarifReportPaths=")
-  fi
-  if [ -s "$OUT/sonar-mutants.json" ]; then
-    props+=("-Dsonar.externalIssuesReportPaths=$OUT/sonar-mutants.json")
-  else
-    props+=("-Dsonar.externalIssuesReportPaths=")
-  fi
+  local props=(
+    "-Dsonar.sarifReportPaths=$OUT/osv.sarif"
+    "-Dsonar.externalIssuesReportPaths=$OUT/sonar-mutants.json"
+  )
   local query="id=$PROJECT_KEY"
   if [ "$BRANCH" != main ]; then
     props+=("-Dsonar.branch.name=$BRANCH")
