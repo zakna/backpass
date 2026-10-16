@@ -851,3 +851,41 @@ pnpm run typecheck      # Run TypeScript checkJs validation
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow.
+
+### Quality scan (SonarQube)
+
+`scripts/quality-scan.sh` runs the tests with coverage, scans `pnpm-lock.yaml`
+for known vulnerabilities (OSV-Scanner), runs StrykerJS mutation testing, and
+sends all of it to the SonarQube server on the LAN:
+
+```sh
+export SONAR_TOKEN=...          # SonarQube analysis token (Bitwarden: sonarqube-analysis-token)
+scripts/quality-scan.sh         # STRYKER_MODE=diff, full or off overrides the default below
+```
+
+On a branch, Stryker mutates only the `src/`, `bin/` and `scripts/` files
+changed since `main` (minutes). On `main` it mutates every file, because
+SonarQube closes any mutant issue a later `main` analysis does not report
+again; `--incremental` makes reruns retest only what changed, but the first full
+run is about 20,000 mutants and takes hours.
+
+Needs Go (the first run builds a pinned OSV-Scanner into
+`.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`),
+`curl`, and Node 22.18+ or 24.11+ (StrykerJS's own floor, above the CLI's).
+All reports land in `.cache/quality/`; Stryker's HTML report, with the
+mutation score, is `.cache/quality/stryker/mutation.html`.
+
+It only reports: findings and a red quality gate never fail it. Without
+`SONAR_TOKEN`, or when the server does not answer, it prints
+`SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
+tests fail. The token is handed to `sonar-scanner` alone, never to the tests
+or the other tools. A detached HEAD is not uploaded unless `SONAR_BRANCH`
+names its branch, so it cannot overwrite `main`'s results. A scan without the
+OSV-Scanner or the Stryker report (including `STRYKER_MODE=off`) is not
+uploaded either: SonarQube would mark the issues it last saw as fixed.
+
+Results appear at <http://192.168.42.33:9001/dashboard?id=zakna_backpass>
+(LAN or Tailscale only); a branch other than `main` is analysed as its own
+branch. Vulnerabilities appear as issues from the `osv-scanner` engine; mutants
+the tests did not catch appear as issues with the rules `stryker.survived` and
+`stryker.no-coverage`.

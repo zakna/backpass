@@ -40,15 +40,16 @@
   "scripts": {
     "check": "npm run lint && npm run format:check && npm run typecheck && npm test",
     "start": "node bin/backpass.js",
-    "lint": "eslint bin src test",
+    "lint": "eslint bin src test scripts stryker.config.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --import ./test/helpers/isolate-config.js --test \"test/**/*.test.js\"",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@stryker-mutator/core": "10.0.0",
+    "@stryker-mutator/tap-runner": "10.0.0",
     "@types/node": "^25.6.2",
     "eslint": "^10.3.0",
     "eslint-config-prettier": "^10.1.8",
