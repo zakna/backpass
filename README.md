@@ -851,3 +851,31 @@ pnpm run typecheck      # Run TypeScript checkJs validation
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow.
+
+### Quality scan (SonarQube)
+
+`scripts/quality-scan.sh` runs the tests with coverage, scans `pnpm-lock.yaml`
+for known vulnerabilities (OSV-Scanner), runs StrykerJS mutation testing on the
+`src/`, `bin/` and `scripts/` files changed since `main`, and sends all of it to the
+SonarQube server on the LAN:
+
+```sh
+export SONAR_TOKEN=...          # SonarQube analysis token (Bitwarden: sonarqube-analysis-token)
+scripts/quality-scan.sh         # STRYKER_MODE=full for every source file, off to skip
+```
+
+Needs Go (the first run builds a pinned OSV-Scanner into
+`.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`) and
+`curl`. All reports land in `.cache/quality/`; Stryker's HTML report, with the
+mutation score, is `.cache/quality/stryker/mutation.html`.
+
+It only reports: findings and a red quality gate never fail it. Without
+`SONAR_TOKEN`, or when the server does not answer, it prints
+`SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
+tests fail.
+
+Results appear at <http://192.168.42.33:9001/dashboard?id=zakna_backpass>
+(LAN or Tailscale only); a branch other than `main` is analysed as its own
+branch. Vulnerabilities appear as issues from the `osv-scanner` engine; mutants
+the tests did not catch appear as issues with the rules `stryker.survived` and
+`stryker.no-coverage`.
