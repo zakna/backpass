@@ -855,24 +855,32 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow.
 ### Quality scan (SonarQube)
 
 `scripts/quality-scan.sh` runs the tests with coverage, scans `pnpm-lock.yaml`
-for known vulnerabilities (OSV-Scanner), runs StrykerJS mutation testing on the
-`src/`, `bin/` and `scripts/` files changed since `main`, and sends all of it to the
-SonarQube server on the LAN:
+for known vulnerabilities (OSV-Scanner), runs StrykerJS mutation testing, and
+sends all of it to the SonarQube server on the LAN:
 
 ```sh
 export SONAR_TOKEN=...          # SonarQube analysis token (Bitwarden: sonarqube-analysis-token)
-scripts/quality-scan.sh         # STRYKER_MODE=full for every source file, off to skip
+scripts/quality-scan.sh         # STRYKER_MODE=diff, full or off overrides the default below
 ```
 
+On a branch, Stryker mutates only the `src/`, `bin/` and `scripts/` files
+changed since `main` (minutes). On `main` it mutates every file, because
+SonarQube closes any mutant issue a later `main` analysis does not report
+again; `--incremental` makes reruns retest only what changed, but the first full
+run is about 20,000 mutants and takes hours.
+
 Needs Go (the first run builds a pinned OSV-Scanner into
-`.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`) and
-`curl`. All reports land in `.cache/quality/`; Stryker's HTML report, with the
+`.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`),
+`curl`, and Node 22.18+ or 24.11+ (StrykerJS's own floor, above the CLI's).
+All reports land in `.cache/quality/`; Stryker's HTML report, with the
 mutation score, is `.cache/quality/stryker/mutation.html`.
 
 It only reports: findings and a red quality gate never fail it. Without
 `SONAR_TOKEN`, or when the server does not answer, it prints
 `SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
-tests fail.
+tests fail. The token is handed to `sonar-scanner` alone, never to the tests
+or the other tools. A detached HEAD is not uploaded unless `SONAR_BRANCH`
+names its branch, so it cannot overwrite `main`'s results.
 
 Results appear at <http://192.168.42.33:9001/dashboard?id=zakna_backpass>
 (LAN or Tailscale only); a branch other than `main` is analysed as its own

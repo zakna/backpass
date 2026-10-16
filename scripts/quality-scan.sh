@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Quality scan: tests with coverage, dependency vulnerabilities (OSV-Scanner
-# over pnpm-lock.yaml), StrykerJS mutation testing on the files changed since
-# main, then a SonarQube analysis that imports all of it.
+# over pnpm-lock.yaml), StrykerJS mutation testing (the files changed since
+# main on a branch, every file on main), then a SonarQube analysis that imports
+# all of it.
 #
 # Reporting only: findings never fail the run, and an unreachable SonarQube
 # server or missing SONAR_TOKEN prints a "skipped" line and exits 0. The only
@@ -9,12 +10,21 @@
 # also works as a git pre-push hook.
 #
 # Environment:
-#   SONAR_TOKEN        analysis token; read by sonar-scanner, never printed
+#   SONAR_TOKEN        analysis token; handed to sonar-scanner only, never
+#                      printed and never inherited by the tests or tools
 #   SONAR_HOST_URL     default http://192.168.42.33:9001
-#   STRYKER_MODE       diff (default), full, or off
-#   STRYKER_DIFF_REF   base for diff mode; default: merge-base with main,
-#                      or HEAD~1 when HEAD is already on main
+#   SONAR_BRANCH       branch to analyse; default: the checked-out branch.
+#                      A detached HEAD is not uploaded unless this is set.
+#   STRYKER_MODE       diff, full, or off. Default: full on main, because
+#                      SonarQube closes every mutant a main analysis does not
+#                      report again (--incremental keeps reruns cheap after
+#                      the first run, which takes hours); diff elsewhere
+#   STRYKER_DIFF_REF   base for diff mode; default: merge-base with main
 set -uo pipefail
+
+# Only sonar-scanner needs the token: keep it out of every other process.
+sonar_token=${SONAR_TOKEN:-}
+unset SONAR_TOKEN
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 
@@ -23,7 +33,12 @@ TOOLS=.cache/quality-tools
 HOST=${SONAR_HOST_URL:-http://192.168.42.33:9001}
 HOST=${HOST%/}
 PROJECT_KEY=zakna_backpass
-MODE=${STRYKER_MODE:-diff}
+BRANCH=${SONAR_BRANCH:-$(git symbolic-ref --short -q HEAD || true)}
+if [ "$BRANCH" = main ]; then
+  MODE=${STRYKER_MODE:-full}
+else
+  MODE=${STRYKER_MODE:-diff}
+fi
 
 rm -rf "$OUT"
 mkdir -p "$OUT" "$TOOLS"
@@ -52,6 +67,7 @@ tool() {
 say "node --test with coverage"
 node --import ./test/helpers/isolate-config.js --test --experimental-test-coverage \
   --test-coverage-include='src/**' --test-coverage-include='bin/**' \
+  --test-coverage-include='scripts/**' \
   --test-reporter=tap --test-reporter-destination="$OUT/test.tap" \
   --test-reporter=lcov --test-reporter-destination="$OUT/lcov.info" \
   "test/**/*.test.js" >/dev/null 2>"$OUT/test.log"
@@ -97,9 +113,7 @@ stryker() {
       for base in origin/main main; do
         ref=$(git merge-base HEAD "$base" 2>/dev/null) && break
       done
-      if [ -z "$ref" ] || [ "$ref" = "$(git rev-parse HEAD)" ]; then
-        ref=HEAD~1
-      fi
+      [ -n "$ref" ] || ref=HEAD~1
     fi
     files=$(git diff --name-only --diff-filter=d "$ref" -- 'src/*.js' 'bin/*.js' 'scripts/*.js' | paste -sd, -)
     if [ -z "$files" ]; then
@@ -126,7 +140,7 @@ stryker
 
 # --- 4. SonarQube -----------------------------------------------------------
 sonar() {
-  if [ -z "${SONAR_TOKEN:-}" ]; then
+  if [ -z "$sonar_token" ]; then
     say "SonarQube: skipped (SONAR_TOKEN is not set)"
     return
   fi
@@ -134,12 +148,16 @@ sonar() {
     say "SonarQube: skipped (sonar-scanner is not installed)"
     return
   fi
+  if [ -z "$BRANCH" ]; then
+    say "SonarQube: skipped (detached HEAD; set SONAR_BRANCH to name the branch)"
+    return
+  fi
   if ! curl -fsS -m 5 "$HOST/api/system/status" 2>/dev/null | grep -q '"status":"UP"'; then
     say "SonarQube: skipped (server $HOST is unreachable or not UP)"
     return
   fi
 
-  local props=() branch
+  local props=()
   if [ -s "$OUT/osv.sarif" ]; then
     props+=("-Dsonar.sarifReportPaths=$OUT/osv.sarif")
   else
@@ -150,17 +168,16 @@ sonar() {
   else
     props+=("-Dsonar.externalIssuesReportPaths=")
   fi
-  branch=$(git symbolic-ref --short -q HEAD || true)
   local query="id=$PROJECT_KEY"
-  if [ -n "$branch" ] && [ "$branch" != main ]; then
-    props+=("-Dsonar.branch.name=$branch")
-    query="$query&branch=$branch"
+  if [ "$BRANCH" != main ]; then
+    props+=("-Dsonar.branch.name=$BRANCH")
+    query="$query&branch=$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$BRANCH")"
   fi
 
   say "SonarQube scan on $HOST"
-  # The scanner reads SONAR_TOKEN from the environment; it is never passed on
-  # the command line, so it does not show up in ps or in the log.
-  if sonar-scanner -Dsonar.host.url="$HOST" -Dsonar.qualitygate.wait=true \
+  # The scanner reads SONAR_TOKEN from its own environment; it is never passed
+  # on the command line, so it does not show up in ps or in the log.
+  if SONAR_TOKEN=$sonar_token sonar-scanner -Dsonar.host.url="$HOST" -Dsonar.qualitygate.wait=true \
     "${props[@]}" >"$OUT/sonar-scanner.log" 2>&1; then
     say "SonarQube: quality gate passed"
   elif grep -q 'QUALITY GATE STATUS: FAILED' "$OUT/sonar-scanner.log"; then

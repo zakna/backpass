@@ -1,6 +1,6 @@
 // @ts-check
 // StrykerJS mutation testing for backpass. scripts/quality-scan.sh runs it on
-// the files changed since main (STRYKER_MODE=full for all of them); a plain
+// the files changed since main on a branch and on every file on main; a plain
 // `pnpm exec stryker run` mutates everything.
 //
 // There is no StrykerJS runner for node:test, so the tap runner runs each test
