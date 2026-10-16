@@ -111,6 +111,12 @@ stryker() {
     say "Stryker: skipped (STRYKER_MODE=off)"
     incomplete="STRYKER_MODE=off"
     return
+  elif ! node -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit((a === 22 && b >= 18) || (a === 24 && b >= 11) || a > 24 ? 0 : 1)'; then
+    # StrykerJS's Babel 8 dependencies declare node ^22.18.0 || >=24.11.0, above
+    # the CLI's own >=22.5.0 floor; on an older runtime it is not run at all.
+    say "Stryker: skipped (needs Node 22.18+ or 24.11+, found $(node -v))"
+    incomplete="Node $(node -v) is below StrykerJS's floor"
+    return
   elif [ "$MODE" = full ]; then
     # Incremental: a rerun only retests mutants whose code or test file
     # changed. Stryker cannot see any other input, so the results file is
