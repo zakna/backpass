@@ -871,7 +871,8 @@ run is about 20,000 mutants and takes hours.
 
 Needs Go (the first run builds a pinned OSV-Scanner into
 `.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`),
-`curl`, and Node 22.18+ or 24.11+ (StrykerJS's own floor, above the CLI's).
+`curl`, and Node 22.18+ or 24.11+ for Stryker (its own floor, above the CLI's;
+on an older Node the scan skips Stryker and the SonarQube upload).
 All reports land in `.cache/quality/`; Stryker's HTML report, with the
 mutation score, is `.cache/quality/stryker/mutation.html`.
 
