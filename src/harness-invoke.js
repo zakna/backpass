@@ -432,7 +432,7 @@ child.on("exit", (code, signal) => {
     wrapperPath = path.join(dir, `${binName}.cmd`);
     fs.writeFileSync(wrapperPath, `@echo off\r\n${cmdQuote(process.execPath)} ${cmdQuote(scriptPath)} %*\r\n`);
   } else {
-    fs.chmodSync(scriptPath, 0o755);
+    fs.chmodSync(scriptPath, 0o700);
   }
   return { wrapperPath, nodeCommand: renderCommandArgv([process.execPath, scriptPath]), dir };
 }

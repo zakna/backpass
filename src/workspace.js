@@ -175,6 +175,12 @@ function isFile(file) {
   }
 }
 
+/** Code-unit order, the same order a bare `.sort()` gives; locale collation would reorder paths. */
+function compareStrings(a, b) {
+  if (a < b) return -1;
+  return a > b ? 1 : 0;
+}
+
 /** True when an already-resolved path lies strictly inside `root`; a null root confines nothing. */
 function withinRoot(root, resolved) {
   if (!root) return true;
@@ -436,7 +442,7 @@ export function measureWorkspace(workspace) {
 
   const present = new Set(walkFiles(root).map((p) => p.split(path.sep).join("/")));
 
-  const ordered = [memoryPath, ...[...originals.keys()].filter((f) => f !== memoryPath).sort()];
+  const ordered = [memoryPath, ...[...originals.keys()].filter((f) => f !== memoryPath).sort(compareStrings)];
   for (const logical of ordered) {
     const original = originals.get(logical);
     const staged = stagedPaths.get(logical) || workspacePathFor(logical);
@@ -461,7 +467,7 @@ export function measureWorkspace(workspace) {
   ];
 
   const knownStaged = new Set(stagedPaths.values());
-  for (const staged of [...present].sort()) {
+  for (const staged of [...present].sort(compareStrings)) {
     if (knownStaged.has(staged)) continue;
     const mapping = dirMappings.find(({ staged: dir }) => staged === dir || staged.startsWith(`${dir}/`));
     if (!mapping) {

@@ -371,8 +371,9 @@ export function mergeGapEntries(ledger, groups) {
     for (const id of ids) claimed.add(id);
 
     const entries = ids.map((id) => ledger.entries[id]);
-    const target = entries.reduce((best, e) =>
-      Object.keys(e.sessions).length > Object.keys(best.sessions).length ? e : best,
+    const target = entries.reduce(
+      (best, e) => (Object.keys(e.sessions).length > Object.keys(best.sessions).length ? e : best),
+      entries[0],
     );
     for (const entry of entries) {
       if (entry === target) continue;
