@@ -2649,6 +2649,9 @@ test("JSON is recovered from a fenced or prose-wrapped model reply", () => {
   assert.deepEqual(extractJson('Here you go:\n```json\n{"a":2}\n```\nhope that helps'), { a: 2 });
   assert.deepEqual(extractJson('prefix {"a":3} suffix'), { a: 3 });
   assert.equal(extractJson("no json at all"), null);
+  assert.deepEqual(extractJson('```JSON\n{"a":4}\n```'), { a: 4 });
+  assert.deepEqual(extractJson('```\n{"a":5}\n```'), { a: 5 });
+  assert.equal(extractJson("```json\n".repeat(20000)), null);
 });
 
 // ---------- the budget gate's two modes ----------

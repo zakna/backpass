@@ -194,14 +194,24 @@ export function stripAcpxNoise(text) {
     .trim();
 }
 
+/** Body of the first ``` fence (optional `json` tag dropped), or null. Linear scan, no regex backtracking. */
+function fencedBody(text) {
+  const open = text.indexOf("```");
+  if (open === -1) return null;
+  const close = text.indexOf("```", open + 3);
+  if (close === -1) return null;
+  const body = text.slice(open + 3, close);
+  return body.slice(body.slice(0, 4).toLowerCase() === "json" ? 4 : 0);
+}
+
 /**
  * Pull a JSON object out of a model reply, tolerating prose or a fenced block around it.
  */
 export function extractJson(text) {
   const cleaned = stripAcpxNoise(text);
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(cleaned);
   const candidates = [];
-  if (fenced) candidates.push(fenced[1]);
+  const fenced = fencedBody(cleaned);
+  if (fenced !== null) candidates.push(fenced);
   candidates.push(cleaned);
 
   for (const candidate of candidates) {
