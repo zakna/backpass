@@ -28,6 +28,7 @@ export function storeRoot() {
 }
 
 export function cwdHash(cwd) {
+  // Cursor names each chat directory md5(cwd); we must match its scheme. Not a security use.
   return crypto.createHash("md5").update(cwd, "utf8").digest("hex");
 }
 
