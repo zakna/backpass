@@ -276,26 +276,8 @@ function tail(stderr, lines = 3) {
     .join("; ");
 }
 
-/**
- * Why a host could not be reached, in the words the person needs (design section 6.9).
- * Returns null when the call succeeded. Every message names the next action, and none
- * of them suggests `StrictHostKeyChecking=no`: a host key that cannot be verified is a
- * decision for the person, not a flag for a tool.
- *
- * @param {{ code?: number | null, stdout?: string, stderr?: string,
- *   timedOut?: boolean, spawnError?: object }} result
- * @param {{ destination: string, connectTimeoutSeconds?: number, timeoutMs?: number }} context
- * @returns {{ reason: string, message: string } | null}
- */
-export function classifySshFailure(
-  result,
-  { destination, connectTimeoutSeconds = DEFAULT_CONNECT_TIMEOUT_SECONDS, timeoutMs = DEFAULT_CALL_TIMEOUT_MS },
-) {
-  const stderr = String(result?.stderr || "");
-
-  if (result?.spawnError && result.spawnError.code === "ENOENT") {
-    return { reason: "ssh-missing", message: "ssh not found on PATH" };
-  }
+/** Host-key, Tailscale and credential refusals, recognised from what ssh printed. */
+function classifyAuthStderr(stderr, destination) {
   if (/REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(stderr)) {
     return {
       reason: "host-key-changed",
@@ -324,6 +306,31 @@ export function classifySshFailure(
       message: `non-interactive ssh to ${destination} failed; make "ssh ${destination} true" succeed without a prompt`,
     };
   }
+  return null;
+}
+
+/**
+ * Why a host could not be reached, in the words the person needs (design section 6.9).
+ * Returns null when the call succeeded. Every message names the next action, and none
+ * of them suggests `StrictHostKeyChecking=no`: a host key that cannot be verified is a
+ * decision for the person, not a flag for a tool.
+ *
+ * @param {{ code?: number | null, stdout?: string, stderr?: string,
+ *   timedOut?: boolean, spawnError?: object }} result
+ * @param {{ destination: string, connectTimeoutSeconds?: number, timeoutMs?: number }} context
+ * @returns {{ reason: string, message: string } | null}
+ */
+export function classifySshFailure(
+  result,
+  { destination, connectTimeoutSeconds = DEFAULT_CONNECT_TIMEOUT_SECONDS, timeoutMs = DEFAULT_CALL_TIMEOUT_MS },
+) {
+  const stderr = String(result?.stderr || "");
+
+  if (result?.spawnError && result.spawnError.code === "ENOENT") {
+    return { reason: "ssh-missing", message: "ssh not found on PATH" };
+  }
+  const authFailure = classifyAuthStderr(stderr, destination);
+  if (authFailure) return authFailure;
   if (result?.timedOut) {
     return {
       reason: "unreachable",

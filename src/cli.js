@@ -164,14 +164,36 @@ EXAMPLES
 function overridesFrom(values) {
   const overrides = { discovery: {}, analysis: {}, synthesis: {} };
 
-  if (values.since) overrides.discovery.since = values.since;
+  applyDiscoveryFlags(overrides.discovery, values);
+  applyTuningFlags(overrides, values);
+  if (values.project?.length) overrides.discovery.includeProjects = values.project;
+  if (values["memory-file"]?.length) overrides.memoryFiles = values["memory-file"];
+  if (values["skills-dir"]) overrides.skillsDir = values["skills-dir"];
+  if (values.theme) overrides.theme = values.theme;
+
+  applyAgentFlags(overrides.analysis, values, "analysis");
+  applyAgentFlags(overrides.synthesis, values, "synthesis");
+  if (values["no-auto-agent"]) overrides.autoAgent = false;
+
+  for (const key of ["discovery", "analysis", "synthesis"]) {
+    if (!Object.keys(overrides[key]).length) delete overrides[key];
+  }
+  return overrides;
+}
+
+function applyDiscoveryFlags(discovery, values) {
+  if (values.since) discovery.since = values.since;
   if (values.harness) {
-    overrides.discovery.harnesses = values.harness
+    discovery.harnesses = values.harness
       .split(",")
       .map((h) => h.trim())
       .filter(Boolean);
   }
-  if (values["include-cursor-ide"]) overrides.discovery.includeCursorIde = true;
+  if (values["include-cursor-ide"]) discovery.includeCursorIde = true;
+}
+
+/** Positive-integer flags that land directly on the config, in the order they are validated. */
+function applyTuningFlags(overrides, values) {
   if (values.jobs) overrides.jobs = toInt(values.jobs, "--jobs");
   if (values.budget) overrides.budgetTokens = toInt(values.budget, "--budget");
   if (values["max-edits"]) overrides.maxEditsPerRun = toInt(values["max-edits"], "--max-edits");
@@ -185,40 +207,19 @@ function overridesFrom(values) {
   if (values["min-gap-projects"]) {
     overrides.minGapProjects = toInt(values["min-gap-projects"], "--min-gap-projects");
   }
-  if (values.project?.length) {
-    overrides.discovery = overrides.discovery || {};
-    overrides.discovery.includeProjects = values.project;
-  }
-  if (values["memory-file"]?.length) overrides.memoryFiles = values["memory-file"];
-  if (values["skills-dir"]) overrides.skillsDir = values["skills-dir"];
-  if (values.theme) overrides.theme = values.theme;
+}
 
-  if (values["analysis-agent"]) {
-    overrides.analysis.agent = values["analysis-agent"];
-    if (String(values["analysis-agent"]).trim().toLowerCase() !== "pi" && values["analysis-tools"] === undefined) {
-      overrides.analysis.tools = null;
-    }
+/** The `--<role>-agent/-model/-effort/-tools` flags of one model role (analysis or synthesis). */
+function applyAgentFlags(target, values, role) {
+  const agent = values[`${role}-agent`];
+  const tools = values[`${role}-tools`];
+  if (agent) {
+    target.agent = agent;
+    if (String(agent).trim().toLowerCase() !== "pi" && tools === undefined) target.tools = null;
   }
-  if (values["analysis-model"]) overrides.analysis.model = values["analysis-model"];
-  if (values["analysis-effort"]) overrides.analysis.effort = values["analysis-effort"];
-  if (values["analysis-tools"] !== undefined)
-    overrides.analysis.tools = toTools(values["analysis-tools"], "--analysis-tools");
-  if (values["synthesis-agent"]) {
-    overrides.synthesis.agent = values["synthesis-agent"];
-    if (String(values["synthesis-agent"]).trim().toLowerCase() !== "pi" && values["synthesis-tools"] === undefined) {
-      overrides.synthesis.tools = null;
-    }
-  }
-  if (values["synthesis-model"]) overrides.synthesis.model = values["synthesis-model"];
-  if (values["synthesis-effort"]) overrides.synthesis.effort = values["synthesis-effort"];
-  if (values["synthesis-tools"] !== undefined)
-    overrides.synthesis.tools = toTools(values["synthesis-tools"], "--synthesis-tools");
-  if (values["no-auto-agent"]) overrides.autoAgent = false;
-
-  for (const key of ["discovery", "analysis", "synthesis"]) {
-    if (!Object.keys(overrides[key]).length) delete overrides[key];
-  }
-  return overrides;
+  if (values[`${role}-model`]) target.model = values[`${role}-model`];
+  if (values[`${role}-effort`]) target.effort = values[`${role}-effort`];
+  if (tools !== undefined) target.tools = toTools(tools, `--${role}-tools`);
 }
 
 function toInt(value, flag) {
@@ -252,6 +253,59 @@ const COMMANDS = {
   run: cmdRun,
 };
 
+function buildContext(values, positionals, commandName) {
+  const kind = parseScopeKind(values.scope);
+  const overrides = overridesFrom(values);
+  let repo = null;
+  let config;
+  if (kind === "user") {
+    config = loadConfig(null, overrides, { kind: "user" });
+  } else {
+    repo = resolveRepo(process.cwd());
+    config = loadConfig(repo.root, overrides);
+  }
+  config.discovery.hosts = applyHostFlag(config.discovery.hosts, values.host);
+  const scope = resolveScope(process.cwd(), { ...values, scope: kind, strict: Boolean(values.strict) }, config, repo);
+  printScopeNote(scope);
+  if (values.target !== undefined && !TARGET_COMMANDS.has(commandName)) {
+    throw new UserError(
+      `--target does not apply to ${commandName}`,
+      "it narrows the default run, analyze, propose, and apply",
+    );
+  }
+  if (values.target !== undefined && Array.isArray(values["memory-file"]) && values["memory-file"].length) {
+    throw new UserError("--target cannot be combined with --memory-file", "name the one file with --target");
+  }
+  // Resolved after the scope so user-scope entries and skill dirs are the ones matched.
+  config.target = resolveTarget(values.target, scope);
+  printTargetNote(config.target);
+  config.memoryFiles = config.target.kind === "memory" ? [config.target.path] : scope.memoryFiles;
+  config.skillsDir = scope.overflowDir;
+  if (scope.skillDirs.length) config.skillsDirs = scope.skillDirs;
+  config.state = new State(scope.root, {
+    stateDir: scope.stateDir,
+    mode: kind === "user" ? 0o700 : undefined,
+    exclude: kind === "user" ? false : undefined,
+  }).ensure();
+  config.agents = new AgentResolver(config, {
+    state: config.state,
+    cwd: scope.modelCwd,
+    bypassCache: Boolean(values.force),
+  });
+
+  const ctx = {
+    repo: scope.repo,
+    scope,
+    config,
+    flags: values,
+    positionals: positionals.slice(1),
+    version: VERSION,
+    strict: Boolean(values.strict),
+    limit: values.limit ? toInt(values.limit, "--limit") : null,
+  };
+  return ctx;
+}
+
 export async function main(argv) {
   let parsed;
   try {
@@ -283,55 +337,7 @@ export async function main(argv) {
   }
 
   try {
-    const kind = parseScopeKind(values.scope);
-    const overrides = overridesFrom(values);
-    let repo = null;
-    let config;
-    if (kind === "user") {
-      config = loadConfig(null, overrides, { kind: "user" });
-    } else {
-      repo = resolveRepo(process.cwd());
-      config = loadConfig(repo.root, overrides);
-    }
-    config.discovery.hosts = applyHostFlag(config.discovery.hosts, values.host);
-    const scope = resolveScope(process.cwd(), { ...values, scope: kind, strict: Boolean(values.strict) }, config, repo);
-    printScopeNote(scope);
-    if (values.target !== undefined && !TARGET_COMMANDS.has(commandName)) {
-      throw new UserError(
-        `--target does not apply to ${commandName}`,
-        "it narrows the default run, analyze, propose, and apply",
-      );
-    }
-    if (values.target !== undefined && Array.isArray(values["memory-file"]) && values["memory-file"].length) {
-      throw new UserError("--target cannot be combined with --memory-file", "name the one file with --target");
-    }
-    // Resolved after the scope so user-scope entries and skill dirs are the ones matched.
-    config.target = resolveTarget(values.target, scope);
-    printTargetNote(config.target);
-    config.memoryFiles = config.target.kind === "memory" ? [config.target.path] : scope.memoryFiles;
-    config.skillsDir = scope.overflowDir;
-    if (scope.skillDirs.length) config.skillsDirs = scope.skillDirs;
-    config.state = new State(scope.root, {
-      stateDir: scope.stateDir,
-      mode: kind === "user" ? 0o700 : undefined,
-      exclude: kind === "user" ? false : undefined,
-    }).ensure();
-    config.agents = new AgentResolver(config, {
-      state: config.state,
-      cwd: scope.modelCwd,
-      bypassCache: Boolean(values.force),
-    });
-
-    const ctx = {
-      repo: scope.repo,
-      scope,
-      config,
-      flags: values,
-      positionals: positionals.slice(1),
-      version: VERSION,
-      strict: Boolean(values.strict),
-      limit: values.limit ? toInt(values.limit, "--limit") : null,
-    };
+    const ctx = buildContext(values, positionals, commandName);
 
     return (await command(ctx)) ?? 0;
   } catch (err) {

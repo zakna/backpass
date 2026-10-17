@@ -62,49 +62,57 @@ function myers(a, b) {
 
   const max = Math.min(n + m, MAX_EDIT_DISTANCE);
   const offset = max;
-  const trace = [];
-  let v = new Int32Array(2 * max + 2);
-  v[offset + 1] = 0;
-  let found = false;
+  const trace = forwardTrace(a, b, max);
 
-  for (let d = 0; d <= max && !found; d += 1) {
-    const snapshot = new Int32Array(v);
-    trace.push(snapshot);
-    for (let k = -d; k <= d; k += 2) {
-      let x;
-      if (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])) x = v[offset + k + 1];
-      else x = v[offset + k - 1] + 1;
-      let y = x - k;
-      while (x < n && y < m && a[x] === b[y]) {
-        x += 1;
-        y += 1;
-      }
-      v[offset + k] = x;
-      if (x >= n && y >= m) {
-        found = true;
-        break;
-      }
-    }
-  }
-
-  if (!found) {
+  if (!trace) {
     // Too different to refine within bounds: one hunk replacing the whole middle.
     return [
       ...a.map((_, i) => ({ type: "delete", oldIndex: i, newIndex: 0 })),
       ...b.map((_, j) => ({ type: "insert", oldIndex: n, newIndex: j })),
     ];
   }
+  return backtrack(trace, offset, n, m);
+}
 
-  // Backtrack through the recorded frontiers.
+/** Whether the path to diagonal `k` at depth `d` arrives from the diagonal above (an insert). */
+function movesDown(frontier, offset, k, d) {
+  return k === -d || (k !== d && frontier[offset + k - 1] < frontier[offset + k + 1]);
+}
+
+/** Record each depth's frontier until the end is reached; null when `max` edits are not enough. */
+function forwardTrace(a, b, max) {
+  const n = a.length;
+  const m = b.length;
+  const offset = max;
+  const trace = [];
+  const v = new Int32Array(2 * max + 2);
+  v[offset + 1] = 0;
+
+  for (let d = 0; d <= max; d += 1) {
+    trace.push(new Int32Array(v));
+    for (let k = -d; k <= d; k += 2) {
+      let x = movesDown(v, offset, k, d) ? v[offset + k + 1] : v[offset + k - 1] + 1;
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x += 1;
+        y += 1;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) return trace;
+    }
+  }
+  return null;
+}
+
+/** Backtrack through the recorded frontiers. */
+function backtrack(trace, offset, n, m) {
   const ops = [];
   let x = n;
   let y = m;
   for (let d = trace.length - 1; d >= 0; d -= 1) {
     const frontier = trace[d];
     const k = x - y;
-    let prevK;
-    if (k === -d || (k !== d && frontier[offset + k - 1] < frontier[offset + k + 1])) prevK = k + 1;
-    else prevK = k - 1;
+    const prevK = movesDown(frontier, offset, k, d) ? k + 1 : k - 1;
     const prevX = frontier[offset + prevK];
     const prevY = prevX - prevK;
     while (x > prevX && y > prevY) {

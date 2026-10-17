@@ -68,13 +68,16 @@ function eventSignature(result) {
     .digest("hex");
 }
 
+function startsWithSelfSentinel(content) {
+  const firstUser = content?.events?.find((event) => event?.kind === "message" && event.role === "user");
+  return typeof firstUser?.text === "string" && firstUser.text.startsWith(SELF_SESSION_SENTINEL);
+}
+
 async function descriptorFrom(adapter, row, id) {
   const content = adapter.sqliteBacked ? await adapter.read(row) : null;
   const contentSignature = content ? eventSignature(content) : null;
-  const firstUser = content?.events?.find((event) => event?.kind === "message" && event.role === "user");
-  const self = typeof firstUser?.text === "string" && firstUser.text.startsWith(SELF_SESSION_SENTINEL);
   return {
-    self,
+    self: startsWithSelfSentinel(content),
     descriptor: {
       harness: adapter.name,
       kind: fetchKind(adapter),
@@ -99,29 +102,26 @@ async function descriptorFrom(adapter, row, id) {
   };
 }
 
-async function discoverHarness(adapter, { cutoffMs }) {
-  const stats = { scanned: 0, classified: 0, self: 0, error: null };
-  const out = [];
-  const warnings = [];
-
-  if (adapter.discover) {
-    for (const row of await adapter.discover({ cutoffMs })) {
-      stats.scanned += 1;
-      stats.classified += 1;
-      try {
-        const built = await descriptorFrom(adapter, row, row.id);
-        if (built.self) {
-          stats.self += 1;
-          continue;
-        }
-        out.push(built.descriptor);
-      } catch (err) {
-        warnings.push(`${adapter.name} session ${row.id || row.key || row.path} skipped: ${err.message}`);
+/** Adapters that list sessions themselves (SQLite stores) rather than files to classify. */
+async function discoverListed(adapter, cutoffMs, { stats, out, warnings }) {
+  for (const row of await adapter.discover({ cutoffMs })) {
+    stats.scanned += 1;
+    stats.classified += 1;
+    try {
+      const built = await descriptorFrom(adapter, row, row.id);
+      if (built.self) {
+        stats.self += 1;
+        continue;
       }
+      out.push(built.descriptor);
+    } catch (err) {
+      warnings.push(`${adapter.name} session ${row.id || row.key || row.path} skipped: ${err.message}`);
     }
-    return { stats, descriptors: out, warnings };
   }
+}
 
+/** File-backed adapters: enumerate, classify, then describe each candidate. */
+async function discoverEnumerated(adapter, cutoffMs, { stats, out, warnings }) {
   for (const candidate of adapter.enumerate({ cutoffMs })) {
     if (cutoffMs && candidate.mtimeMs < cutoffMs) continue;
     stats.scanned += 1;
@@ -152,7 +152,13 @@ async function discoverHarness(adapter, { cutoffMs }) {
     }
     out.push(descriptor);
   }
-  return { stats, descriptors: out, warnings };
+}
+
+async function discoverHarness(adapter, { cutoffMs }) {
+  const sink = { stats: { scanned: 0, classified: 0, self: 0, error: null }, out: [], warnings: [] };
+  if (adapter.discover) await discoverListed(adapter, cutoffMs, sink);
+  else await discoverEnumerated(adapter, cutoffMs, sink);
+  return { stats: sink.stats, descriptors: sink.out, warnings: sink.warnings };
 }
 
 /** @param {{ harnesses?: string[], cutoffMs?: number | null }} request */
@@ -232,40 +238,49 @@ function writeAll(stream, chunk) {
  */
 export async function fetchTranscripts({ items = [] } = {}, { stdout = process.stdout } = {}) {
   for (const item of items) {
-    const adapter = ADAPTERS[item.harness];
-    let header;
-    let body;
-    try {
-      if (!adapter) throw new Error(`no adapter for harness ${item.harness}`);
-      if (fetchKind(adapter) === "raw") {
-        const file = rawPathOf(adapter, item);
-        const stat = fs.statSync(file);
-        if (stat.size > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, stat.size);
-        body = fs.readFileSync(file);
-        if (body.length > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, body.length);
-        header = { key: item.key, harness: item.harness, kind: "raw", bytes: body.length, mtimeMs: mtimeOf(file) };
-      } else {
-        const result = await adapter.read(item);
-        body = Buffer.from(JSON.stringify({ events: result.events || [], model: result.model || null }), "utf8");
-        if (body.length > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, body.length);
-        header = {
-          key: item.key,
-          harness: item.harness,
-          kind: "events",
-          bytes: body.length,
-          mtimeMs: item.mtimeMs ?? null,
-          contentSignature: eventSignature(result),
-          model: result.model || null,
-        };
-      }
-    } catch (err) {
-      header = { key: item.key, harness: item.harness, kind: "error", bytes: 0, error: err.message };
-      body = Buffer.alloc(0);
-    }
+    const { header, body } = await fetchFrame(item);
     await writeAll(stdout, encodeFrameHeader(header));
     if (body.length) await writeAll(stdout, body);
   }
   await writeAll(stdout, encodeEndFrame());
+}
+
+/** One item as a frame; any failure becomes an error frame so a single transcript never ends the stream. */
+async function fetchFrame(item) {
+  try {
+    const adapter = ADAPTERS[item.harness];
+    if (!adapter) throw new Error(`no adapter for harness ${item.harness}`);
+    return fetchKind(adapter) === "raw" ? rawFrame(adapter, item) : await eventsFrame(adapter, item);
+  } catch (err) {
+    const header = { key: item.key, harness: item.harness, kind: "error", bytes: 0, error: err.message };
+    return { header, body: Buffer.alloc(0) };
+  }
+}
+
+function rawFrame(adapter, item) {
+  const file = rawPathOf(adapter, item);
+  const stat = fs.statSync(file);
+  if (stat.size > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, stat.size);
+  const body = fs.readFileSync(file);
+  if (body.length > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, body.length);
+  const header = { key: item.key, harness: item.harness, kind: "raw", bytes: body.length, mtimeMs: mtimeOf(file) };
+  return { header, body };
+}
+
+async function eventsFrame(adapter, item) {
+  const result = await adapter.read(item);
+  const body = Buffer.from(JSON.stringify({ events: result.events || [], model: result.model || null }), "utf8");
+  if (body.length > MAX_FRAME_BODY_BYTES) throw transcriptTooLarge(item, body.length);
+  const header = {
+    key: item.key,
+    harness: item.harness,
+    kind: "events",
+    bytes: body.length,
+    mtimeMs: item.mtimeMs ?? null,
+    contentSignature: eventSignature(result),
+    model: result.model || null,
+  };
+  return { header, body };
 }
 
 function mtimeOf(file) {

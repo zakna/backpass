@@ -366,6 +366,32 @@ function refuseRepoHosts(repoFile, file) {
   );
 }
 
+function mergeUserLayers(overrides) {
+  const globalFile = readJsonIfPresent(userConfigPath());
+  const userBlock = isPlainObject(globalFile?.user) ? globalFile.user : {};
+  const harnessPaths = userHarnessPaths();
+  const merged = [DEFAULT_CONFIG, { ...USER_CONFIG_DEFAULTS, ...harnessPaths }, userBlock, overrides].reduce(
+    (acc, layer) => (layer ? deepMerge(acc, layer) : acc),
+    {},
+  );
+  if (userBlock.discovery?.hosts === undefined && overrides.discovery?.hosts === undefined) {
+    merged.discovery.hosts = globalFile?.discovery?.hosts ?? DEFAULT_CONFIG.discovery.hosts;
+  }
+  return merged;
+}
+
+function mergeProjectLayers(repoRoot, overrides) {
+  const globalFile = readJsonIfPresent(userConfigPath());
+  const projectGlobal = globalFile ? { ...globalFile } : null;
+  if (projectGlobal) delete projectGlobal.user;
+  const repoFile = repoRoot ? readJsonIfPresent(path.join(repoRoot, CONFIG_FILENAME)) : null;
+  refuseRepoHosts(repoFile, repoRoot ? path.join(repoRoot, CONFIG_FILENAME) : CONFIG_FILENAME);
+  return [projectGlobal, repoFile, overrides].reduce(
+    (acc, layer) => (layer ? deepMerge(acc, layer) : acc),
+    DEFAULT_CONFIG,
+  );
+}
+
 /**
  * Layered config.
  *
@@ -380,29 +406,7 @@ function refuseRepoHosts(repoFile, file) {
  */
 export function loadConfig(repoRoot, overrides = {}, { kind = "project" } = {}) {
   const scopeKind = parseScopeKind(kind);
-  let merged;
-  if (scopeKind === "user") {
-    const globalFile = readJsonIfPresent(userConfigPath());
-    const userBlock = isPlainObject(globalFile?.user) ? globalFile.user : {};
-    const harnessPaths = userHarnessPaths();
-    merged = [DEFAULT_CONFIG, { ...USER_CONFIG_DEFAULTS, ...harnessPaths }, userBlock, overrides].reduce(
-      (acc, layer) => (layer ? deepMerge(acc, layer) : acc),
-      {},
-    );
-    if (userBlock.discovery?.hosts === undefined && overrides.discovery?.hosts === undefined) {
-      merged.discovery.hosts = globalFile?.discovery?.hosts ?? DEFAULT_CONFIG.discovery.hosts;
-    }
-  } else {
-    const globalFile = readJsonIfPresent(userConfigPath());
-    const projectGlobal = globalFile ? { ...globalFile } : null;
-    if (projectGlobal) delete projectGlobal.user;
-    const repoFile = repoRoot ? readJsonIfPresent(path.join(repoRoot, CONFIG_FILENAME)) : null;
-    refuseRepoHosts(repoFile, repoRoot ? path.join(repoRoot, CONFIG_FILENAME) : CONFIG_FILENAME);
-    merged = [projectGlobal, repoFile, overrides].reduce(
-      (acc, layer) => (layer ? deepMerge(acc, layer) : acc),
-      DEFAULT_CONFIG,
-    );
-  }
+  const merged = scopeKind === "user" ? mergeUserLayers(overrides) : mergeProjectLayers(repoRoot, overrides);
 
   const config = structuredClone(merged);
   config.skillsDir = normalizeSkillsDir(config.skillsDir);

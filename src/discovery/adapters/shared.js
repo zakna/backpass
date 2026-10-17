@@ -117,49 +117,52 @@ export function contentToEvents(role, content, events) {
     return;
   }
   const texts = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") {
-      if (typeof block === "string") texts.push(block);
-      continue;
-    }
-    switch (block.type) {
-      case "text":
-      case "input_text":
-      case "output_text":
-        if (block.text) texts.push(block.text);
-        break;
-      case "tool_use":
-      case "toolCall":
-        events.push({
-          kind: "tool",
-          name: block.name,
-          input: block.input ?? block.arguments,
-          pendingId: block.id ?? block.call_id,
-        });
-        break;
-      case "tool_result":
-      case "toolResult":
-        events.push({
-          kind: "tool-result",
-          id: block.tool_use_id ?? block.id,
-          result: block.content ?? block.output ?? block.text,
-          status: block.is_error ? "error" : "completed",
-        });
-        break;
-      case "thinking":
-      case "reasoning":
-      case "reasoning_trace":
-      case "open_a_i_reasoning":
-      case "image":
-        break;
-      default:
-        if (typeof block.text === "string") texts.push(block.text);
-        break;
-    }
-  }
+  for (const block of content) blockToEvents(block, events, texts);
   if (texts.length) {
     const joined = texts.join("\n").trim();
     if (joined) events.push({ kind: "message", role, text: joined });
+  }
+}
+
+/** One content block: text is collected into `texts`, tool blocks become their own events. */
+function blockToEvents(block, events, texts) {
+  if (!block || typeof block !== "object") {
+    if (typeof block === "string") texts.push(block);
+    return;
+  }
+  switch (block.type) {
+    case "text":
+    case "input_text":
+    case "output_text":
+      if (block.text) texts.push(block.text);
+      break;
+    case "tool_use":
+    case "toolCall":
+      events.push({
+        kind: "tool",
+        name: block.name,
+        input: block.input ?? block.arguments,
+        pendingId: block.id ?? block.call_id,
+      });
+      break;
+    case "tool_result":
+    case "toolResult":
+      events.push({
+        kind: "tool-result",
+        id: block.tool_use_id ?? block.id,
+        result: block.content ?? block.output ?? block.text,
+        status: block.is_error ? "error" : "completed",
+      });
+      break;
+    case "thinking":
+    case "reasoning":
+    case "reasoning_trace":
+    case "open_a_i_reasoning":
+    case "image":
+      break;
+    default:
+      if (typeof block.text === "string") texts.push(block.text);
+      break;
   }
 }
 
@@ -177,17 +180,13 @@ export function attachToolResults(events) {
       continue;
     }
     if (event.kind === "tool-result") {
-      const target = event.id && byId.get(event.id);
+      // An orphan result (truncated log, or a harness that does not correlate ids) answers
+      // the latest call still waiting.
+      const target =
+        (event.id && byId.get(event.id)) || [...out].reverse().find((e) => e.kind === "tool" && e.result === undefined);
       if (target) {
         target.result = event.result;
         target.status = event.status;
-      } else {
-        // Orphan result (truncated log, or a harness that does not correlate ids).
-        const last = [...out].reverse().find((e) => e.kind === "tool" && e.result === undefined);
-        if (last) {
-          last.result = event.result;
-          last.status = event.status;
-        }
       }
       continue;
     }

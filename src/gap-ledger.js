@@ -113,12 +113,7 @@ export function disambiguateSourceLabels(entries) {
     ...entry,
     source: sourceByIdentity.get(entry.identity) || entry.source,
   }));
-  const identitiesBySource = new Map();
-  for (const entry of canonical) {
-    if (!entry.source) continue;
-    if (!identitiesBySource.has(entry.source)) identitiesBySource.set(entry.source, new Set());
-    identitiesBySource.get(entry.source).add(entry.identity || entry.source);
-  }
+  const identitiesBySource = identitiesBySourceOf(canonical);
   return canonical.map((entry) => {
     const identities = identitiesBySource.get(entry.source);
     if (identities?.size > 1 && entry.identity && !entry.source.includes(entry.identity)) {
@@ -126,6 +121,16 @@ export function disambiguateSourceLabels(entries) {
     }
     return entry.source;
   });
+}
+
+function identitiesBySourceOf(canonical) {
+  const identitiesBySource = new Map();
+  for (const entry of canonical) {
+    if (!entry.source) continue;
+    if (!identitiesBySource.has(entry.source)) identitiesBySource.set(entry.source, new Set());
+    identitiesBySource.get(entry.source).add(entry.identity || entry.source);
+  }
+  return identitiesBySource;
 }
 
 function normalize(text) {
@@ -316,24 +321,27 @@ export function ledgerGapObservations(ledger, memoryPath, skills = null) {
   for (const entry of Object.values(ledger.entries)) {
     if (entry.memoryPath !== memoryPath) continue;
     for (const [sessionId, obs] of Object.entries(entry.sessions)) {
-      observations.push({
-        proposedInstruction: entry.proposedInstruction,
-        phrasings: obs.phrasings?.length ? obs.phrasings : [entry.proposedInstruction],
-        sessionId,
-        source: obs.source,
-        mistake: obs.mistake,
-        quote: obs.quote,
-        recurrenceRisk: obs.recurrenceRisk,
-        domain: obs.domain === "orchestration" ? "orchestration" : "project",
-        ...(obs.coveredBySkill && (!skillNames || skillNames.has(obs.coveredBySkill))
-          ? { coveredBySkill: obs.coveredBySkill }
-          : {}),
-        ...(obs.project ? { project: obs.project } : {}),
-        ...(obs.projectRoot ? { projectRoot: obs.projectRoot } : {}),
-      });
+      observations.push(ledgerObservation(entry, sessionId, obs, skillNames));
     }
   }
   return observations;
+}
+
+function ledgerObservation(entry, sessionId, obs, skillNames) {
+  const keepsSkill = obs.coveredBySkill && (!skillNames || skillNames.has(obs.coveredBySkill));
+  return {
+    proposedInstruction: entry.proposedInstruction,
+    phrasings: obs.phrasings?.length ? obs.phrasings : [entry.proposedInstruction],
+    sessionId,
+    source: obs.source,
+    mistake: obs.mistake,
+    quote: obs.quote,
+    recurrenceRisk: obs.recurrenceRisk,
+    domain: obs.domain === "orchestration" ? "orchestration" : "project",
+    ...(keepsSkill ? { coveredBySkill: obs.coveredBySkill } : {}),
+    ...(obs.project ? { project: obs.project } : {}),
+    ...(obs.projectRoot ? { projectRoot: obs.projectRoot } : {}),
+  };
 }
 
 /**

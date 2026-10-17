@@ -59,60 +59,79 @@ export function globToRegExp(glob, { home = process.env.HOME || "" } = {}) {
   return new RegExp(`^${out}/?$`);
 }
 
+/** Tier 1 / 1.5 - a live path under one of `worktrees`, or exactly one of them. */
+function liveWorktreeMatch(candidates, worktrees, hit) {
+  for (const candidate of candidates) {
+    const real = realpathOrResolve(candidate);
+    for (const worktree of worktrees) {
+      if (real === worktree) return hit(worktree, true);
+      if (isUnder(real, worktree)) return hit(worktree, false);
+    }
+  }
+  return null;
+}
+
+/** Tier 2 - the first recorded remote this repo also has, or null. */
+function recordedRemoteMatch(remotes, repoRemotes, suffix = "") {
+  for (const remote of remotes) {
+    const norm = normalizeRemote(remote);
+    if (norm && repoRemotes.has(norm)) {
+      return { tier: 2, confidence: "remote", reason: `recorded remote ${norm}${suffix}` };
+    }
+  }
+  return null;
+}
+
+/** Tier 3 - the association for one dead path, or null. */
+function deadPathMatch(resolved, repo, globs, test, where, flavor = path) {
+  if (flavor.basename(resolved.replace(/\/+$/, "")) === repo.name) {
+    return { tier: 3, confidence: "path", reason: `dead path ending in /${repo.name}${where}` };
+  }
+  for (const glob of globs) {
+    if (test(glob)) {
+      return { tier: 3, confidence: "glob", reason: `dead path matches glob ${glob}${where}` };
+    }
+  }
+  return null;
+}
+
+/** Tiers 1, 1.5 and 2 - everything decidable without a path being dead. */
+function liveAssociation(candidates, remotes, repo) {
+  // Tier 1 - live path under a known worktree of this clone.
+  const live = liveWorktreeMatch(candidates, repo.worktrees, (worktree, exact) => ({
+    tier: 1,
+    confidence: exact ? "exact" : "nested",
+    reason: exact ? `cwd is worktree ${worktree}` : `cwd is inside worktree ${worktree}`,
+  }));
+  if (live) return live;
+
+  // Tier 1.5 - live path under a sibling clone that shares a remote.
+  const sibling = liveWorktreeMatch(candidates, repo.siblingWorktrees || [], (worktree, exact) => ({
+    tier: 1.5,
+    confidence: "sibling",
+    reason: exact ? `cwd is sibling clone ${worktree}` : `cwd is inside sibling clone ${worktree}`,
+  }));
+  if (sibling) return sibling;
+
+  // Tier 2 - recorded remote, valid even when the worktree is long gone.
+  return recordedRemoteMatch(remotes, new Set(repo.remotes));
+}
+
 export function associate(descriptor, repo, options = {}) {
   if (options.facts) return associateRemote(descriptor, repo, options);
   const { cwd, remotes = [], gitRoot = null } = descriptor;
   const globs = options.worktreeGlobs || [];
   const candidates = [cwd, gitRoot].filter(Boolean);
 
-  // Tier 1 - live path under a known worktree of this clone.
-  for (const candidate of candidates) {
-    const real = realpathOrResolve(candidate);
-    for (const worktree of repo.worktrees) {
-      if (real === worktree) {
-        return { tier: 1, confidence: "exact", reason: `cwd is worktree ${worktree}` };
-      }
-      if (isUnder(real, worktree)) {
-        return { tier: 1, confidence: "nested", reason: `cwd is inside worktree ${worktree}` };
-      }
-    }
-  }
-
-  // Tier 1.5 - live path under a sibling clone that shares a remote.
-  const siblingWorktrees = repo.siblingWorktrees || [];
-  for (const candidate of candidates) {
-    const real = realpathOrResolve(candidate);
-    for (const worktree of siblingWorktrees) {
-      if (real === worktree) {
-        return { tier: 1.5, confidence: "sibling", reason: `cwd is sibling clone ${worktree}` };
-      }
-      if (isUnder(real, worktree)) {
-        return { tier: 1.5, confidence: "sibling", reason: `cwd is inside sibling clone ${worktree}` };
-      }
-    }
-  }
-
-  // Tier 2 - recorded remote, valid even when the worktree is long gone.
-  const repoRemotes = new Set(repo.remotes);
-  for (const remote of remotes) {
-    const norm = normalizeRemote(remote);
-    if (norm && repoRemotes.has(norm)) {
-      return { tier: 2, confidence: "remote", reason: `recorded remote ${norm}` };
-    }
-  }
+  const found = liveAssociation(candidates, remotes, repo);
+  if (found) return found;
 
   // Tier 3 - best-effort, only for paths that no longer exist.
   for (const candidate of candidates) {
     const resolved = path.resolve(candidate);
     if (fs.existsSync(resolved)) continue;
-    if (path.basename(resolved.replace(/\/+$/, "")) === repo.name) {
-      return { tier: 3, confidence: "path", reason: `dead path ending in /${repo.name}` };
-    }
-    for (const glob of globs) {
-      if (globToRegExp(glob).test(resolved)) {
-        return { tier: 3, confidence: "glob", reason: `dead path matches glob ${glob}` };
-      }
-    }
+    const dead = deadPathMatch(resolved, repo, globs, (glob) => globToRegExp(glob).test(resolved), "");
+    if (dead) return dead;
   }
 
   return null;
@@ -149,26 +168,23 @@ export function associateRemote({ cwd, remotes = [], gitRoot = null }, repo, opt
   }
 
   // Tier 2 - a remote the transcript itself recorded (codex, grok).
-  for (const remote of remotes) {
-    const norm = normalizeRemote(remote);
-    if (norm && repoRemotes.has(norm)) {
-      return { tier: 2, confidence: "remote", reason: `recorded remote ${norm} (on ${host})` };
-    }
-  }
+  const recorded = recordedRemoteMatch(remotes, repoRemotes, ` (on ${host})`);
+  if (recorded) return recorded;
 
   // Tier 3 - best-effort, only for paths that no longer exist over there.
   for (const candidate of candidates) {
     const fact = facts[candidate];
     if (fact?.exists) continue;
     const resolved = fact?.real || candidate;
-    if (path.posix.basename(String(resolved).replace(/\/+$/, "")) === repo.name) {
-      return { tier: 3, confidence: "path", reason: `dead path ending in /${repo.name} on ${host}` };
-    }
-    for (const glob of globs) {
-      if (globToRegExp(glob, { home }).test(resolved)) {
-        return { tier: 3, confidence: "glob", reason: `dead path matches glob ${glob} on ${host}` };
-      }
-    }
+    const dead = deadPathMatch(
+      String(resolved),
+      repo,
+      globs,
+      (glob) => globToRegExp(glob, { home }).test(resolved),
+      ` on ${host}`,
+      path.posix,
+    );
+    if (dead) return dead;
   }
 
   return null;

@@ -60,13 +60,35 @@ async function cmdScanCore(ctx) {
     return 0;
   }
 
+  printScopeHeader(ctx);
+  out("");
+
+  out(table(sourceRows(perHarness, perHost)));
+  const selfTotal = Object.values(perHarness).reduce((n, s) => n + (s.self || 0), 0);
+  if (selfTotal) out(color.dim(`  SELF = backpass's own loss / gradient-descent sessions, excluded from the corpus`));
+  out("");
+
+  printTierSummary(ctx, transcripts, mix, truncated);
+  out("");
+
+  const preview = transcripts.slice(0, 25);
+  out(table(previewRows(ctx, preview)));
+  if (transcripts.length > preview.length) {
+    info(color.dim(`  ... and ${transcripts.length - preview.length} more`));
+  }
+  return 0;
+}
+
+function printScopeHeader(ctx) {
   if (ctx.scope?.kind === "user") {
     out(`user scope · since ${ctx.config.discovery.since}`);
   } else {
     out(`${ctx.repo.name} · ${ctx.repo.worktrees.length} worktree(s) · since ${ctx.config.discovery.since}`);
   }
-  out("");
+}
 
+/** The local-harness rows followed by one row per ssh host. */
+function sourceRows(perHarness, perHost) {
   const rows = [["HOST", "HARNESS", "SCANNED", "MATCHED", "SELF", "CACHED", "NOTE"]];
   for (const [harness, stats] of Object.entries(perHarness)) {
     rows.push([
@@ -90,11 +112,10 @@ async function cmdScanCore(ctx) {
       hostNote(host),
     ]);
   }
-  out(table(rows));
-  const selfTotal = Object.values(perHarness).reduce((n, s) => n + (s.self || 0), 0);
-  if (selfTotal) out(color.dim(`  SELF = backpass's own loss / gradient-descent sessions, excluded from the corpus`));
-  out("");
+  return rows;
+}
 
+function printTierSummary(ctx, transcripts, mix, truncated) {
   const byTier = { 1: 0, 1.5: 0, 2: 0, 3: 0 };
   for (const t of transcripts) byTier[t.association.tier] += 1;
   if (ctx.scope?.kind === "user") {
@@ -118,43 +139,25 @@ async function cmdScanCore(ctx) {
   }
   if (byTier[3] && !ctx.strict) out(color.dim("  re-run with --strict to exclude the best-effort tier"));
   if (truncated) out(color.dim(`  --limit ${ctx.limit} is hiding ${truncated} more transcript(s)`));
-  out("");
+}
 
-  const preview = transcripts.slice(0, 25);
-  const detail =
-    ctx.scope?.kind === "user"
-      ? [["HOST", "HARNESS", "SESSION", "KIND", "WHEN", "SIZE", "TIER", "PROJECT"]]
-      : [["HOST", "HARNESS", "SESSION", "KIND", "WHEN", "SIZE", "TIER", "HOW"]];
+function previewRows(ctx, preview) {
+  const user = ctx.scope?.kind === "user";
+  const detail = [["HOST", "HARNESS", "SESSION", "KIND", "WHEN", "SIZE", "TIER", user ? "PROJECT" : "HOW"]];
   for (const t of preview) {
-    detail.push(
-      ctx.scope?.kind === "user"
-        ? [
-            t.host || "local",
-            t.harness,
-            t.nativeId.slice(0, 12),
-            t.interaction,
-            ago(t.mtimeMs),
-            t.bytes ? `${Math.round(t.bytes / 1024)}KB` : "-",
-            `t${t.association.tier}`,
-            String(t.project || t.cwd || "-").slice(0, 48),
-          ]
-        : [
-            t.host || "local",
-            t.harness,
-            t.nativeId.slice(0, 12),
-            t.interaction,
-            ago(t.mtimeMs),
-            t.bytes ? `${Math.round(t.bytes / 1024)}KB` : "-",
-            `t${t.association.tier}`,
-            t.association.reason,
-          ],
-    );
+    const last = user ? String(t.project || t.cwd || "-").slice(0, 48) : t.association.reason;
+    detail.push([
+      t.host || "local",
+      t.harness,
+      t.nativeId.slice(0, 12),
+      t.interaction,
+      ago(t.mtimeMs),
+      t.bytes ? `${Math.round(t.bytes / 1024)}KB` : "-",
+      `t${t.association.tier}`,
+      last,
+    ]);
   }
-  out(table(detail));
-  if (transcripts.length > preview.length) {
-    info(color.dim(`  ... and ${transcripts.length - preview.length} more`));
-  }
-  return 0;
+  return detail;
 }
 
 /** One host row's note: the named failure, or what the probe found over there. */

@@ -85,8 +85,8 @@ export function prepareHarnessInvocation({
     }
   };
 
-  const requestedModel = typeof model === "string" && model.trim() ? model.trim() : null;
-  const requestedEffort = typeof effort === "string" && effort.trim() ? effort.trim() : null;
+  const requestedModel = trimmedOrNull(model);
+  const requestedEffort = trimmedOrNull(effort);
   const requestedTools = Array.isArray(tools)
     ? [...new Set(tools.map((tool) => String(tool).trim()).filter(Boolean))]
     : null;
@@ -99,42 +99,74 @@ export function prepareHarnessInvocation({
   if (!overlay && !writeAccess) return baseInvocation({ notes, dispose });
 
   try {
-    let invocation;
-    if (agent === "pi") {
-      invocation = overlay
-        ? piInvocation({
-            requestedModel,
-            requestedEffort,
-            requestedTools,
-            transcriptInspector,
-            notes,
-            cleanups,
-            dispose,
-          })
-        : baseInvocation({ notes, dispose });
-    } else if (agent === "grok") {
-      invocation = grokInvocation({ requestedModel, requestedEffort, writeAccess, notes, cleanups, dispose });
-    } else if (agent === "claude" || agent === "codex" || agent === "opencode") {
-      invocation = {
-        ...baseInvocation({ notes, dispose }),
-        acpxModel: requestedModel,
-        setEffortKey: requestedEffort ? SESSION_LOCAL_EFFORT_KEYS[agent] : null,
-        requiredBuiltinAgent: overlay ? agent : null,
-      };
-    } else if (overlay) {
-      throw new UserError(
-        `${agent} has no proven invocation-scoped way to apply ${describeOverride(requestedModel, requestedEffort)} without writing persistent harness defaults`,
-        "pin pi, claude, codex, grok, or opencode, or omit the model and effort override",
-      );
-    } else {
-      invocation = baseInvocation({ notes, dispose });
-    }
+    const invocation = invocationForAgent(agent, {
+      overlay,
+      requestedModel,
+      requestedEffort,
+      requestedTools,
+      transcriptInspector,
+      writeAccess,
+      notes,
+      cleanups,
+      dispose,
+    });
     if (writeAccess && agent === "codex") applyCodexWriteAccess(invocation, { cleanups });
     return invocation;
   } catch (err) {
     dispose();
     throw err;
   }
+}
+
+function trimmedOrNull(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** The per-harness invocation for a request that carries an overlay or write access. */
+function invocationForAgent(
+  agent,
+  {
+    overlay,
+    requestedModel,
+    requestedEffort,
+    requestedTools,
+    transcriptInspector,
+    writeAccess,
+    notes,
+    cleanups,
+    dispose,
+  },
+) {
+  if (agent === "pi") {
+    if (!overlay) return baseInvocation({ notes, dispose });
+    return piInvocation({
+      requestedModel,
+      requestedEffort,
+      requestedTools,
+      transcriptInspector,
+      notes,
+      cleanups,
+      dispose,
+    });
+  }
+  if (agent === "grok") {
+    return grokInvocation({ requestedModel, requestedEffort, writeAccess, notes, cleanups, dispose });
+  }
+  if (agent === "claude" || agent === "codex" || agent === "opencode") {
+    return {
+      ...baseInvocation({ notes, dispose }),
+      acpxModel: requestedModel,
+      setEffortKey: requestedEffort ? SESSION_LOCAL_EFFORT_KEYS[agent] : null,
+      requiredBuiltinAgent: overlay ? agent : null,
+    };
+  }
+  if (overlay) {
+    throw new UserError(
+      `${agent} has no proven invocation-scoped way to apply ${describeOverride(requestedModel, requestedEffort)} without writing persistent harness defaults`,
+      "pin pi, claude, codex, grok, or opencode, or omit the model and effort override",
+    );
+  }
+  return baseInvocation({ notes, dispose });
 }
 
 function baseInvocation({ notes, dispose }) {
@@ -317,39 +349,45 @@ function mergeCodexConfig(...layers) {
   const merged = {};
   for (const layer of layers) {
     if (!layer) continue;
-    let parsed = layer;
-    if (typeof layer === "string") {
-      try {
-        parsed = JSON.parse(layer);
-      } catch {
-        throw new UserError(
-          "cannot enable Codex file-write access because CODEX_CONFIG is not valid JSON",
-          "unset CODEX_CONFIG or set it to a valid JSON object",
-        );
-      }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new UserError(
-          "cannot enable Codex file-write access because CODEX_CONFIG is not a JSON object",
-          "unset CODEX_CONFIG or set it to a valid JSON object",
-        );
-      }
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-    for (const [key, value] of Object.entries(parsed)) {
-      if (key === "features" && value && typeof value === "object" && !Array.isArray(value)) {
-        const currentFeatures = merged.features;
-        merged.features = {
-          ...(currentFeatures && typeof currentFeatures === "object" && !Array.isArray(currentFeatures)
-            ? currentFeatures
-            : {}),
-          ...value,
-        };
-      } else {
-        merged[key] = value;
-      }
-    }
+    const parsed = typeof layer === "string" ? parseCodexConfigJson(layer) : layer;
+    if (isPlainObject(parsed)) mergeCodexLayer(merged, parsed);
   }
   return JSON.stringify(merged);
+}
+
+/** Copy a layer onto `merged`; the `features` table merges key by key instead of replacing. */
+function mergeCodexLayer(merged, parsed) {
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key === "features" && isPlainObject(value)) {
+      merged.features = { ...(isPlainObject(merged.features) ? merged.features : {}), ...value };
+    } else {
+      merged[key] = value;
+    }
+  }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Parse a `CODEX_CONFIG` string, refusing anything that is not a JSON object. */
+function parseCodexConfigJson(layer) {
+  let parsed;
+  try {
+    parsed = JSON.parse(layer);
+  } catch {
+    throw new UserError(
+      "cannot enable Codex file-write access because CODEX_CONFIG is not valid JSON",
+      "unset CODEX_CONFIG or set it to a valid JSON object",
+    );
+  }
+  if (!isPlainObject(parsed)) {
+    throw new UserError(
+      "cannot enable Codex file-write access because CODEX_CONFIG is not a JSON object",
+      "unset CODEX_CONFIG or set it to a valid JSON object",
+    );
+  }
+  return parsed;
 }
 
 /**

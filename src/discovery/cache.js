@@ -171,6 +171,12 @@ export class HostCache {
 
   /** Drop entries unused for `maxAgeMs`, and any file the index no longer claims. */
   prune(index, { maxAgeMs = PRUNE_MAX_AGE_MS, now = Date.now() } = {}) {
+    const removedEntries = this.pruneEntries(index, maxAgeMs, now);
+    return removedEntries + this.pruneFiles(index, maxAgeMs, now);
+  }
+
+  /** Remove index entries that are malformed or unused for `maxAgeMs`; returns how many went. */
+  pruneEntries(index, maxAgeMs, now) {
     let removed = 0;
     for (const [name, entry] of Object.entries(index.entries)) {
       if (!ENTRY_NAME.test(name)) {
@@ -182,20 +188,21 @@ export class HostCache {
       if (Number.isFinite(usedAt) && now - usedAt < maxAgeMs) continue;
       delete index.entries[name];
       removed += 1;
-      try {
-        fs.rmSync(path.join(this.root, name), { force: true });
-      } catch {
-        // A file we cannot remove is reported by the next status, not a failed run.
-      }
+      this.removeQuietly(name);
     }
+    return removed;
+  }
 
+  /** Remove files the index no longer claims (past the safety window) and stale temporaries. */
+  pruneFiles(index, maxAgeMs, now) {
     const claimed = new Set(Object.keys(index.entries));
     let files;
     try {
       files = fs.readdirSync(this.root, { withFileTypes: true });
     } catch {
-      return removed;
+      return 0;
     }
+    let removed = 0;
     for (const file of files) {
       if (!file.isFile() || file.name === path.basename(this.indexPath)) continue;
       let ageMs;
@@ -205,17 +212,20 @@ export class HostCache {
         continue;
       }
       const orphan = ENTRY_NAME.test(file.name) && !claimed.has(file.name) && ageMs >= ORPHAN_SAFETY_MS;
-      let staleTemporary = false;
-      if (file.name.endsWith(".tmp")) staleTemporary = ageMs >= maxAgeMs;
-      if (!orphan && !staleTemporary) continue;
-      try {
-        fs.rmSync(path.join(this.root, file.name), { force: true });
-        removed += 1;
-      } catch {
-        // A file we cannot remove is reported by the next status, not a failed run.
-      }
+      const staleTemporary = file.name.endsWith(".tmp") && ageMs >= maxAgeMs;
+      if ((orphan || staleTemporary) && this.removeQuietly(file.name)) removed += 1;
     }
     return removed;
+  }
+
+  /** @returns {boolean} whether the file was removed; a file we cannot remove is reported by the next status. */
+  removeQuietly(name) {
+    try {
+      fs.rmSync(path.join(this.root, name), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** @returns {Record<string, { entries: number, bytes: number }>} Entry count and bytes per host. */

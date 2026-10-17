@@ -51,22 +51,7 @@ export function resolveTarget(spec, scope) {
       "those may be one file under several links, or genuinely different files; --target needs a name that identifies exactly one file",
     );
   }
-  if (memoryMatches.length) {
-    const entry = memoryMatches[0];
-    if (!fs.existsSync(resolveInRoot(root, entry))) {
-      throw new UserError(`--target ${entry} is configured but does not exist`, "a targeted run never creates it");
-    }
-    const selected = resolvedMemory.all.find((file) => file.path === entry);
-    const imported = selected ? pointerImportPath(selected.text, { fromDir: path.dirname(selected.absolute) }) : null;
-    if (imported) {
-      const importedPath = pathInRoot(imported, root);
-      throw new UserError(
-        `--target ${entry} is only a pointer to ${importedPath} and cannot be trained directly`,
-        `target ${importedPath} instead`,
-      );
-    }
-    return { kind: "memory", path: entry };
-  }
+  if (memoryMatches.length) return memoryTarget(memoryMatches[0], { root, resolvedMemory });
   if (skillMatches.length) {
     const skill = skillMatches[0];
     // A targeted run writes exactly one file, and staging is what decides whether that
@@ -86,6 +71,23 @@ export function resolveTarget(spec, scope) {
     `--target "${spec}" is not a configured memory file or a loaded skill in this ${user ? "user scope" : "repo"}`,
     `memory files: ${memoryList} · skills: ${skillList}`,
   );
+}
+
+/** A configured memory file is targetable only when it exists and is not just a pointer. */
+function memoryTarget(entry, { root, resolvedMemory }) {
+  if (!fs.existsSync(resolveInRoot(root, entry))) {
+    throw new UserError(`--target ${entry} is configured but does not exist`, "a targeted run never creates it");
+  }
+  const selected = resolvedMemory.all.find((file) => file.path === entry);
+  const imported = selected ? pointerImportPath(selected.text, { fromDir: path.dirname(selected.absolute) }) : null;
+  if (imported) {
+    const importedPath = pathInRoot(imported, root);
+    throw new UserError(
+      `--target ${entry} is only a pointer to ${importedPath} and cannot be trained directly`,
+      `target ${importedPath} instead`,
+    );
+  }
+  return { kind: "memory", path: entry };
 }
 
 export function describeTarget(target) {

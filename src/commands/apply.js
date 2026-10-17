@@ -22,13 +22,9 @@ export function formatFailureLine(failure) {
   return `${color.red("failed")}${location}: ${failure.error}`;
 }
 
-export async function cmdApply(ctx) {
-  const { config, repo } = ctx;
-  const proposal = config.state.readProposal();
-
-  if (!proposal) {
-    throw new UserError("no proposal to apply", "run `backpass` first to produce one");
-  }
+/** Refuse a proposal that cannot be applied in this run; throws a `UserError` naming the repair. */
+function assertApplicable(ctx, proposal) {
+  const { config } = ctx;
   const proposalScope = proposal.scope || "project";
   const runScope = ctx.scope?.kind || "project";
   if (proposalScope !== runScope) {
@@ -56,50 +52,20 @@ export async function cmdApply(ctx) {
       "run `backpass` again to produce a fresh one",
     );
   }
-  if (!proposal.edits.length) {
-    out("The last run proposed no edits. Nothing to apply.");
-    return 0;
-  }
+}
 
-  const editIds = proposal.edits.map((e) => e.id);
-  let decisions;
-  let surfaceFile = null;
+/** Review in the terminal or the browser surface; `surfaceFile` is null for the terminal. */
+async function reviewProposal(ctx, proposal, editIds) {
+  if (ctx.flags["no-ui"]) return { decisions: await reviewInTerminal(proposal), surfaceFile: null };
+  const surfaceFile = renderApplySurface(proposal, ctx.config.state, ctx.version);
+  const url = await openApplySurface(surfaceFile);
+  info(`${color.cyan("·")} review surface: ${url || surfaceFile}`);
+  // Best effort: the printed URL above is the fallback when nothing opens.
+  if (!ctx.flags["no-open"]) openInBrowser(url);
+  return { decisions: await pollDecisions(surfaceFile, editIds), surfaceFile };
+}
 
-  if (ctx.flags["no-ui"]) {
-    decisions = await reviewInTerminal(proposal);
-  } else {
-    surfaceFile = renderApplySurface(proposal, config.state, ctx.version);
-    const url = await openApplySurface(surfaceFile);
-    info(`${color.cyan("·")} review surface: ${url || surfaceFile}`);
-    // Best effort: the printed URL above is the fallback when nothing opens.
-    if (!ctx.flags["no-open"]) openInBrowser(url);
-    decisions = await pollDecisions(surfaceFile, editIds);
-  }
-
-  if (!decisions) {
-    out("No decisions received - nothing was written.");
-    return 0;
-  }
-
-  // Anything the reviewer never touched stays untouched.
-  for (const id of editIds) if (!decisions[id]) decisions[id] = "skipped";
-
-  const results = applyDecisions({
-    proposal,
-    decisions,
-    repo,
-    state: config.state,
-    config,
-    dryRun: Boolean(ctx.flags["dry-run"]),
-  });
-
-  if (surfaceFile) await closeApplySurface(surfaceFile);
-
-  if (ctx.flags.json) {
-    json({ decisions, results, mix: proposal.stats.corpusMix || null });
-    return results.failed.length ? 1 : 0;
-  }
-
+function printApplyResults(ctx, proposal, results) {
   out("");
   const prefix = ctx.flags["dry-run"] ? color.yellow("[dry-run] ") : "";
   out(`${prefix}${results.accepted} accepted · ${results.rejected} rejected`);
@@ -127,6 +93,48 @@ export async function cmdApply(ctx) {
     out(color.dim("  rejections recorded - they will not be re-proposed without new evidence"));
   }
   if (!results.written.length && !results.skills.length) out("  nothing written");
+}
 
+export async function cmdApply(ctx) {
+  const { config, repo } = ctx;
+  const proposal = config.state.readProposal();
+
+  if (!proposal) {
+    throw new UserError("no proposal to apply", "run `backpass` first to produce one");
+  }
+  assertApplicable(ctx, proposal);
+  if (!proposal.edits.length) {
+    out("The last run proposed no edits. Nothing to apply.");
+    return 0;
+  }
+
+  const editIds = proposal.edits.map((e) => e.id);
+  const { decisions, surfaceFile } = await reviewProposal(ctx, proposal, editIds);
+
+  if (!decisions) {
+    out("No decisions received - nothing was written.");
+    return 0;
+  }
+
+  // Anything the reviewer never touched stays untouched.
+  for (const id of editIds) if (!decisions[id]) decisions[id] = "skipped";
+
+  const results = applyDecisions({
+    proposal,
+    decisions,
+    repo,
+    state: config.state,
+    config,
+    dryRun: Boolean(ctx.flags["dry-run"]),
+  });
+
+  if (surfaceFile) await closeApplySurface(surfaceFile);
+
+  if (ctx.flags.json) {
+    json({ decisions, results, mix: proposal.stats.corpusMix || null });
+    return results.failed.length ? 1 : 0;
+  }
+
+  printApplyResults(ctx, proposal, results);
   return results.failed.length ? 1 : 0;
 }

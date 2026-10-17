@@ -43,31 +43,47 @@ function renderDiff(edit) {
   return lines.join("\n");
 }
 
-export function renderEdit(edit, index, total) {
-  const out = [];
-  const kind = edit.kind === "extract" ? "EXTRACT -> SKILL" : edit.kind.toUpperCase();
+function describeDelta(edit) {
   const delta = edit.deltaTokens || 0;
   const descriptionDelta = edit.descriptionDelta || 0;
   // A skill-file edit is on-trigger text except for its description line, which is
   // always loaded and billed; say which part of the delta is which.
   const signed = (n) => `${n > 0 ? "+" : ""}${formatTokens(n)}`;
-  let deltaText;
   if (edit.targetsMemoryFile) {
     const descriptionNote = descriptionDelta ? ` (+${formatTokens(descriptionDelta)} tok skill description)` : "";
-    deltaText = `${signed(delta)} tok${descriptionNote}`;
-  } else if (descriptionDelta) {
-    deltaText = `${signed(descriptionDelta)} tok always-loaded (description), ${signed(delta - descriptionDelta)} tok on trigger`;
-  } else {
-    deltaText = `${signed(delta)} tok (not always-loaded)`;
+    return `${signed(delta)} tok${descriptionNote}`;
   }
+  if (descriptionDelta) {
+    return `${signed(descriptionDelta)} tok always-loaded (description), ${signed(delta - descriptionDelta)} tok on trigger`;
+  }
+  return `${signed(delta)} tok (not always-loaded)`;
+}
+
+function editFiles(edit) {
+  const hunkFiles = Array.isArray(edit.hunks)
+    ? [...new Set(edit.hunks.map((hunk) => hunk.file || edit.file).filter(Boolean))]
+    : [];
+  return hunkFiles.length ? hunkFiles : [edit.file].filter(Boolean);
+}
+
+function renderEvidence(edit) {
+  const out = ["", color.dim(`  evidence (${edit.transcripts} transcript(s)):`)];
+  for (const quote of edit.evidence.slice(0, 4)) {
+    const mark = quote.polarity === "positive" ? color.green("+") : color.red("-");
+    out.push(`    ${mark} "${quote.text.replaceAll(/\s+/g, " ").slice(0, 200)}"`, `      ${color.dim(quote.source)}`);
+  }
+  return out;
+}
+
+export function renderEdit(edit, index, total) {
+  const out = [];
+  const kind = edit.kind === "extract" ? "EXTRACT -> SKILL" : edit.kind.toUpperCase();
+  const deltaText = describeDelta(edit);
 
   out.push("");
   const heading = color.bold(`[${index + 1}/${total}] ${kind}`);
   out.push(`${heading}  ${color.dim(deltaText)}`, `  ${edit.title}`);
-  const hunkFiles = Array.isArray(edit.hunks)
-    ? [...new Set(edit.hunks.map((hunk) => hunk.file || edit.file).filter(Boolean))]
-    : [];
-  const files = hunkFiles.length ? hunkFiles : [edit.file].filter(Boolean);
+  const files = editFiles(edit);
   const fileList = `${files.length === 1 ? "file" : "files"}: ${files.join(", ")}`;
   out.push(`  ${color.dim(fileList)}`);
   if (edit.rationale) out.push(`  ${color.dim(edit.rationale)}`);
@@ -77,13 +93,7 @@ export function renderEdit(edit, index, total) {
     out.push("", color.dim(`  new skill: ${skill.path}`), color.dim(`  description: ${skill.description}`));
   }
 
-  if (edit.evidence?.length) {
-    out.push("", color.dim(`  evidence (${edit.transcripts} transcript(s)):`));
-    for (const quote of edit.evidence.slice(0, 4)) {
-      const mark = quote.polarity === "positive" ? color.green("+") : color.red("-");
-      out.push(`    ${mark} "${quote.text.replaceAll(/\s+/g, " ").slice(0, 200)}"`, `      ${color.dim(quote.source)}`);
-    }
-  }
+  if (edit.evidence?.length) out.push(...renderEvidence(edit));
 
   return out.join("\n");
 }

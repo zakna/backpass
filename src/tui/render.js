@@ -308,6 +308,49 @@ function hostLines(d, theme) {
   return lines;
 }
 
+/** The activity, count and how-collected cells of one harness row, by scan status. */
+function discoverCells(harness, h, theme, state, widths) {
+  if (h.status === "error") return erroredCells(theme, widths);
+  const how = theme.paint(fitPlain(tierLabel(h.tiers), widths.howWidth, "right"), "faint");
+  if (h.status === "scanning") return { ...scanningCells(h, theme, state, widths), how };
+  return { ...doneCells(harness, h, theme, widths), how };
+}
+
+function erroredCells(theme, { activityWidth, countWidth, howWidth }) {
+  return {
+    activity: theme.paint(fitPlain("store unreadable · harness skipped, run continues", activityWidth), "yellow"),
+    count: theme.paint(fitPlain("–", countWidth, "right"), "faint"),
+    how: theme.paint(fitPlain("fail-soft", howWidth, "right"), "faint"),
+  };
+}
+
+function scanningCells(h, theme, state, { activityWidth, countWidth }) {
+  const showBar = (h.total || 0) >= 500;
+  const text = showBar
+    ? `${formatCount(h.scanned)}/${formatCount(h.total)} sessions`
+    : `${formatCount(h.scanned)} sessions`;
+  const bar = showBar ? `${gaugeBar(theme, h.total ? h.scanned / h.total : 0, state.narrow ? 8 : 10)} ` : "";
+  let barWidth = 0;
+  if (showBar) barWidth = state.narrow ? 9 : 11;
+  const matched = theme.paint(formatCount(h.matched), "text", { bold: true });
+  return {
+    activity: bar + theme.paint(fitPlain(text, activityWidth - barWidth), "dim"),
+    count: padVis(`${matched} ${theme.paint("so far", "faint")}`, countWidth, "right"),
+  };
+}
+
+function doneCells(harness, h, theme, { activityWidth, countWidth }) {
+  const scanned = `${formatCount(h.scanned)} sessions`;
+  const fresh = h.newCount > 0 || h.scanned > 0 ? ` · ${formatCount(h.newCount)} new` : "";
+  const self = h.self > 0 ? ` · ${formatCount(h.self)} self` : "";
+  const query = harness === "opencode" || harness === "hermes" ? "1 sqlite query" : `${scanned}${fresh}${self}`;
+  const matched = theme.paint(formatCount(h.matched), "text", { bold: true });
+  return {
+    activity: theme.paint(fitPlain(query, activityWidth), "dim"),
+    count: padVis(`${matched} ${theme.paint("this repo", "faint")}`, countWidth, "right"),
+  };
+}
+
 function discoverDetail(state, theme, width, spin) {
   const d = state.discover;
   const label = d.hostOrder?.length
@@ -318,44 +361,12 @@ function discoverDetail(state, theme, width, spin) {
   const howWidth = 25;
   const activityWidth = width - 2 - 2 - 11 - countWidth - (state.narrow ? 0 : howWidth) - 4;
 
+  const cellWidths = { activityWidth, countWidth, howWidth };
   for (const harness of d.order) {
     const h = d.harnesses[harness];
     const dot = harnessDot(theme, harness);
     const name = theme.paint(fitPlain(harness, 10), "text");
-
-    let activity;
-    let count;
-    let how = theme.paint(fitPlain(tierLabel(h.tiers), howWidth, "right"), "faint");
-    if (h.status === "error") {
-      activity = theme.paint(fitPlain("store unreadable · harness skipped, run continues", activityWidth), "yellow");
-      count = theme.paint(fitPlain("–", countWidth, "right"), "faint");
-      how = theme.paint(fitPlain("fail-soft", howWidth, "right"), "faint");
-    } else if (h.status === "scanning") {
-      const showBar = (h.total || 0) >= 500;
-      const text = showBar
-        ? `${formatCount(h.scanned)}/${formatCount(h.total)} sessions`
-        : `${formatCount(h.scanned)} sessions`;
-      const bar = showBar ? `${gaugeBar(theme, h.total ? h.scanned / h.total : 0, state.narrow ? 8 : 10)} ` : "";
-      let barWidth = 0;
-      if (showBar) barWidth = state.narrow ? 9 : 11;
-      activity = bar + theme.paint(fitPlain(text, activityWidth - barWidth), "dim");
-      count = padVis(
-        `${theme.paint(formatCount(h.matched), "text", { bold: true })} ${theme.paint("so far", "faint")}`,
-        countWidth,
-        "right",
-      );
-    } else {
-      const scanned = `${formatCount(h.scanned)} sessions`;
-      const fresh = h.newCount > 0 || h.scanned > 0 ? ` · ${formatCount(h.newCount)} new` : "";
-      const self = h.self > 0 ? ` · ${formatCount(h.self)} self` : "";
-      const query = harness === "opencode" || harness === "hermes" ? "1 sqlite query" : `${scanned}${fresh}${self}`;
-      activity = theme.paint(fitPlain(query, activityWidth), "dim");
-      count = padVis(
-        `${theme.paint(formatCount(h.matched), "text", { bold: true })} ${theme.paint("this repo", "faint")}`,
-        countWidth,
-        "right",
-      );
-    }
+    const { activity, count, how } = discoverCells(harness, h, theme, state, cellWidths);
 
     const glyph =
       h.status === "scanning" ? theme.paint(spin, "mint") : mark(theme, h.status === "error" ? "error" : "done", spin);

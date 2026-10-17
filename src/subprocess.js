@@ -24,7 +24,18 @@ import path from "node:path";
  *   spawnFn?: (file: string, args: string[], options: object) => any }} [options]
  * @returns {Promise<{ code: number | null, stdout: string, stderr: string, timedOut?: boolean, spawnError?: ShimError }>}
  */
-export function runCapture(
+export function runCapture(bin, args, options = {}) {
+  return new Promise((resolve) => spawnCaptured(resolve, bin, args, options));
+}
+
+/**
+ * @param {(result: any) => void} resolve
+ * @param {string} bin
+ * @param {string[]} args
+ * @param {NonNullable<Parameters<typeof runCapture>[2]>} options
+ */
+function spawnCaptured(
+  resolve,
   bin,
   args,
   {
@@ -37,70 +48,76 @@ export function runCapture(
     spawnFn = spawn,
     captureStdout = true,
     onStdout = null,
-  } = {},
+  },
 ) {
-  return new Promise((resolve) => {
-    const launch = windowsShimLaunch(bin, args, { platform, env: lookupEnv });
-    if (launch.error) {
-      // Loud and named: an argument no quoting can neutralise must not reach a shim
-      // where cmd.exe would silently rewrite it into several arguments or commands.
-      resolve({ code: null, stdout: "", stderr: launch.error.message, spawnError: launch.error });
+  const launch = windowsShimLaunch(bin, args, { platform, env: lookupEnv });
+  if (launch.error) {
+    // Loud and named: an argument no quoting can neutralise must not reach a shim
+    // where cmd.exe would silently rewrite it into several arguments or commands.
+    resolve({ code: null, stdout: "", stderr: launch.error.message, spawnError: launch.error });
+    return;
+  }
+
+  const child = spawnFn(launch.file, launch.args, childSpawnOptions({ cwd, env, platform, timeoutMs, launch }));
+  let stdout = "";
+  let stderr = "";
+  // Shared with the timeout callback, which flags the kill and parks the escalation timer.
+  const kill = { timedOut: false, escalationTimer: null };
+  const timer = armKillTimer(child, { timeoutMs, platform, kill });
+  const clearTimers = () => {
+    if (timer) clearTimeout(timer);
+    if (kill.escalationTimer) clearTimeout(kill.escalationTimer);
+  };
+
+  child.stdout.on("data", (d) => {
+    const chunk = Buffer.isBuffer(d) ? d : Buffer.from(d);
+    if (onStdout) onStdout(chunk);
+    if (captureStdout) stdout += d;
+  });
+  child.stderr.on("data", (d) => {
+    stderr += d;
+  });
+  child.on("error", (err) => {
+    clearTimers();
+    resolve({ code: null, stdout, stderr: `${stderr}${err.message}`, spawnError: err });
+  });
+  child.on("close", (code) => {
+    clearTimers();
+    if (kill.timedOut && platform !== "win32") killPosixGroup(child, "SIGKILL");
+    resolve({ code, stdout, stderr, timedOut: kill.timedOut });
+  });
+
+  child.stdin.end(input);
+}
+
+function childSpawnOptions({ cwd, env, platform, timeoutMs, launch }) {
+  return {
+    cwd,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: env ? { ...process.env, ...env } : undefined,
+    // The shim launch hands cmd.exe one already-quoted command line; Node must
+    // not re-quote it.
+    ...(launch.verbatim ? { windowsVerbatimArguments: true } : {}),
+    // Give a timed command its own POSIX process group. acpx launches adapter
+    // wrappers and harnesses below itself, and killing acpx alone leaves those
+    // descendants running with our capture pipes open.
+    detached: platform !== "win32" && Boolean(timeoutMs),
+  };
+}
+
+/** Arm the timeout that kills a timed command's process tree; null when there is no timeout. */
+function armKillTimer(child, { timeoutMs, platform, kill }) {
+  if (!timeoutMs) return null;
+  return setTimeout(() => {
+    kill.timedOut = true;
+    if (platform === "win32") {
+      killWindowsTree(child.pid);
       return;
     }
-
-    const child = spawnFn(launch.file, launch.args, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: env ? { ...process.env, ...env } : undefined,
-      // The shim launch hands cmd.exe one already-quoted command line; Node must
-      // not re-quote it.
-      ...(launch.verbatim ? { windowsVerbatimArguments: true } : {}),
-      // Give a timed command its own POSIX process group. acpx launches adapter
-      // wrappers and harnesses below itself, and killing acpx alone leaves those
-      // descendants running with our capture pipes open.
-      detached: platform !== "win32" && Boolean(timeoutMs),
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let escalationTimer = null;
-
-    const timer = timeoutMs
-      ? setTimeout(() => {
-          timedOut = true;
-          if (platform === "win32") {
-            killWindowsTree(child.pid);
-            return;
-          }
-          killPosixGroup(child, "SIGTERM");
-          escalationTimer = setTimeout(() => killPosixGroup(child, "SIGKILL"), 5000);
-          escalationTimer.unref();
-        }, timeoutMs)
-      : null;
-
-    child.stdout.on("data", (d) => {
-      const chunk = Buffer.isBuffer(d) ? d : Buffer.from(d);
-      if (onStdout) onStdout(chunk);
-      if (captureStdout) stdout += d;
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d;
-    });
-    child.on("error", (err) => {
-      if (timer) clearTimeout(timer);
-      if (escalationTimer) clearTimeout(escalationTimer);
-      resolve({ code: null, stdout, stderr: `${stderr}${err.message}`, spawnError: err });
-    });
-    child.on("close", (code) => {
-      if (timer) clearTimeout(timer);
-      if (timedOut && platform !== "win32") killPosixGroup(child, "SIGKILL");
-      if (escalationTimer) clearTimeout(escalationTimer);
-      resolve({ code, stdout, stderr, timedOut });
-    });
-
-    if (input !== undefined) child.stdin.end(input);
-    else child.stdin.end();
-  });
+    killPosixGroup(child, "SIGTERM");
+    kill.escalationTimer = setTimeout(() => killPosixGroup(child, "SIGKILL"), 5000);
+    kill.escalationTimer.unref();
+  }, timeoutMs);
 }
 
 /**
@@ -213,10 +230,16 @@ export function resolveOnPath(bin, { platform = process.platform, env = process.
   for (const entry of (env.PATH || "").split(path.delimiter)) {
     const dir = entry.replaceAll(/^"|"$/g, "");
     if (!dir) continue;
-    for (const extension of extensions) {
-      const candidate = path.join(dir, platform === "win32" ? `${bin}${extension.toLowerCase()}` : bin);
-      if (isExecutable(candidate, platform)) return candidate;
-    }
+    const found = findInDir(dir, bin, extensions, platform);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findInDir(dir, bin, extensions, platform) {
+  for (const extension of extensions) {
+    const candidate = path.join(dir, platform === "win32" ? `${bin}${extension.toLowerCase()}` : bin);
+    if (isExecutable(candidate, platform)) return candidate;
   }
   return null;
 }

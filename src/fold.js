@@ -372,17 +372,7 @@ export function clusterGapObservations(observations, { checkProjectCoverage = fa
       coveredBySkills: new Set(obs.coveredBySkill ? [obs.coveredBySkill] : []),
     };
     if (cluster) {
-      const sessionItem = cluster.items.find((candidate) => candidate.sessionId === obs.sessionId);
-      if (sessionItem) {
-        if (obs.coveredBySkill) sessionItem.coveredBySkills.add(obs.coveredBySkill);
-        if (observationDomain(obs) !== "orchestration") sessionItem.domain = "project";
-        if (projectCovered) sessionItem.projectCovered = true;
-      } else {
-        cluster.items.push(item);
-      }
-      if (obs.proposedInstruction.length < cluster.proposedInstruction.length) {
-        cluster.proposedInstruction = obs.proposedInstruction;
-      }
+      addToCluster(cluster, obs, item);
     } else {
       clusters.push({
         proposedInstruction: obs.proposedInstruction,
@@ -403,6 +393,21 @@ export function clusterGapObservations(observations, { checkProjectCoverage = fa
     );
   }
   return clusters;
+}
+
+/** Fold one observation into an existing cluster: a repeat session merges into its item. */
+function addToCluster(cluster, obs, item) {
+  const sessionItem = cluster.items.find((candidate) => candidate.sessionId === obs.sessionId);
+  if (sessionItem) {
+    if (obs.coveredBySkill) sessionItem.coveredBySkills.add(obs.coveredBySkill);
+    if (observationDomain(obs) !== "orchestration") sessionItem.domain = "project";
+    if (item.projectCovered) sessionItem.projectCovered = true;
+  } else {
+    cluster.items.push(item);
+  }
+  if (obs.proposedInstruction.length < cluster.proposedInstruction.length) {
+    cluster.proposedInstruction = obs.proposedInstruction;
+  }
 }
 
 function isProjectCoveredSighting(obs) {
@@ -533,7 +538,21 @@ export function renderEvidenceReport(summary) {
 
 function renderEvidence(summary, { includeReportOnly }) {
   const lines = [];
+  renderEvidenceTotals(lines, summary);
+  renderInstructionEvidence(lines, summary);
+  renderParentEvidence(lines, summary);
+  renderOversizedEvidence(lines, summary);
+  renderGapEvidence(lines, summary);
+  if (includeReportOnly && summary.reportOnlyGaps?.length) {
+    lines.push("", "### REPORT ONLY - not synthesis-eligible evidence");
+    for (const gap of summary.reportOnlyGaps) {
+      lines.push(`- ${gapSessionLabel(gap)} risk=${gap.recurrenceRisk} :: ${gap.proposedInstruction}`);
+    }
+  }
+  return lines.join("\n");
+}
 
+function renderEvidenceTotals(lines, summary) {
   const mix = summary.analyzedByInteraction;
   const mixBit = mix ? ` (interactive ${mix[INTERACTIVE] || 0} · non-interactive ${mix[NON_INTERACTIVE] || 0})` : "";
   lines.push(`Sessions analyzed: ${summary.analyzedSessions}${mixBit}`);
@@ -544,6 +563,9 @@ function renderEvidence(summary, { includeReportOnly }) {
       `${totalGapClusters} gap clusters (${summary.totals.gapClusters} synthesis eligible, ` +
       `${reportOnlyGapClusters} report only, ${summary.totals.droppedGapSingletons} singletons dropped below threshold)`,
   );
+}
+
+function renderInstructionEvidence(lines, summary) {
   lines.push("", "### Per-instruction evidence");
   lines.push(
     "A negative's class is what it means: `harm` = following the instruction caused damage " +
@@ -562,14 +584,18 @@ function renderEvidence(summary, { includeReportOnly }) {
         (row.known ? "" : " (id not found in current file - stale reference)"),
     );
     if (row.skillOverlap) renderSkillOverlap(lines, row.skillOverlap);
-    for (const quote of row.quotes.slice(0, 3)) {
-      const sign = quote.polarity === "negative" ? "-" : "+";
-      const cls = quote.polarity === "negative" ? ` [${quote.class ?? "unclassified"}]` : "";
-      const effect = quote.effect ? ` :: ${oneLine(quote.effect, 200)}` : "";
-      lines.push(`    ${sign}${cls} "${oneLine(quote.text)}"${effect} (${quote.source})`);
-    }
+    for (const quote of row.quotes.slice(0, 3)) lines.push(renderInstructionQuote(quote));
   }
+}
 
+function renderInstructionQuote(quote) {
+  const sign = quote.polarity === "negative" ? "-" : "+";
+  const cls = quote.polarity === "negative" ? ` [${quote.class ?? "unclassified"}]` : "";
+  const effect = quote.effect ? ` :: ${oneLine(quote.effect, 200)}` : "";
+  return `    ${sign}${cls} "${oneLine(quote.text)}"${effect} (${quote.source})`;
+}
+
+function renderParentEvidence(lines, summary) {
   const representedOverlaps = new Set(
     summary.instructions.filter((row) => row.skillOverlap).map((row) => row.instruction),
   );
@@ -589,23 +615,26 @@ function renderEvidence(summary, { includeReportOnly }) {
     lines.push("", "Parent paragraph removal evidence aggregated across sentence parts:");
     for (const [id, sessions] of parentHarm) lines.push(`- ${id} harm-sessions=${sessions}`);
   }
+}
 
-  if (summary.oversized?.length) {
-    lines.push("", "### Oversized units that failed to steer");
+function renderOversizedEvidence(lines, summary) {
+  if (!summary.oversized?.length) return;
+  lines.push("", "### Oversized units that failed to steer");
+  lines.push(
+    "These are one paragraph apiece. Preferred reinforcement is a restructure-in-place: split " +
+      "the paragraph into list items so each claim can be followed. A bold label on the blob is " +
+      "not a strengthen.",
+  );
+  for (const blob of summary.oversized) {
+    const parts = blob.parts.map((id) => `[${id}]`).join(", ");
     lines.push(
-      "These are one paragraph apiece. Preferred reinforcement is a restructure-in-place: split " +
-        "the paragraph into list items so each claim can be followed. A bold label on the blob is " +
-        "not a strengthen.",
+      `- ${blob.id} is ${blob.tokens} tokens as one paragraph (attribution: ${parts}). ` +
+        `Split it into list items; do not decorate the blob.`,
     );
-    for (const blob of summary.oversized) {
-      const parts = blob.parts.map((id) => `[${id}]`).join(", ");
-      lines.push(
-        `- ${blob.id} is ${blob.tokens} tokens as one paragraph (attribution: ${parts}). ` +
-          `Split it into list items; do not decorate the blob.`,
-      );
-    }
   }
+}
 
+function renderGapEvidence(lines, summary) {
   lines.push("", "### Synthesis-eligible gap clusters (mistakes no current instruction covers)");
   if (summary.totals.orchestrationGapSightings) {
     lines.push(
@@ -634,15 +663,6 @@ function renderEvidence(summary, { includeReportOnly }) {
       lines.push(`    "${oneLine(quote.text)}" (${quote.source})`);
     }
   }
-
-  if (includeReportOnly && summary.reportOnlyGaps?.length) {
-    lines.push("", "### REPORT ONLY - not synthesis-eligible evidence");
-    for (const gap of summary.reportOnlyGaps) {
-      lines.push(`- ${gapSessionLabel(gap)} risk=${gap.recurrenceRisk} :: ${gap.proposedInstruction}`);
-    }
-  }
-
-  return lines.join("\n");
 }
 
 function gapSessionLabel(gap) {

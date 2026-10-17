@@ -321,163 +321,239 @@ function terminalMessage(reason, attempts, violations) {
  * `holder.session` is the live session; the loop replaces it when it needs a fresh one and
  * the caller closes whatever is in the holder at the end.
  */
-async function annotateLoop({
-  holder,
-  freshSession,
-  workspace,
-  fingerprint,
-  repo,
-  context,
-  common,
-  promptDir,
-  timeoutSeconds,
-  promptRetries,
-  usage,
-  notes,
-  noteOnce,
-  overflow,
-  progress,
-  renderPreface,
-  startFresh = false,
-}) {
-  const { memoryFile, config } = context;
-  const state = config.state;
-
-  let attempts = 0;
-  let remeasures = 0;
-  let emptyTurns = 0;
-  let violationsToShow = [];
-  let justRemeasured = false;
-  let owePreface = startFresh;
-  /** @type {{ attempt: number, violations: string[], notes?: string[] } | null} */
-  let saved = null;
+async function annotateLoop(options) {
+  const { startFresh = false, context } = options;
+  const { state } = context.config;
+  /**
+   * Loop state shared by the turn handlers. `editMadeNoChanges` records whether the edit
+   * turn that preceded this loop left the staging copy untouched - a stray out-of-scope
+   * edit still counts as touched, so it is never hidden behind "edit-empty". Only the
+   * very first turn's measurement answers that question; a later remeasure reflects edits
+   * made during annotation instead, which "editing" already covers.
+   * @type {{ attempts: number, remeasures: number, emptyTurns: number, violationsToShow: string[], justRemeasured: boolean, owePreface: boolean, saved: { attempt: number, violations: string[], notes?: string[] } | null, editMadeNoChanges: boolean }}
+   */
+  const st = {
+    attempts: 0,
+    remeasures: 0,
+    emptyTurns: 0,
+    violationsToShow: [],
+    justRemeasured: false,
+    owePreface: startFresh,
+    saved: null,
+    editMadeNoChanges: false,
+  };
   /** @type {{ reason: string, violations: string[] }} */
   let terminal;
-  // Whether the edit turn that preceded this loop left the staging copy untouched - a
-  // stray out-of-scope edit still counts as touched, so it is never hidden behind
-  // "edit-empty". Only the very first turn's measurement answers that question; a later
-  // remeasure reflects edits made during annotation instead, which "editing" already covers.
-  let editMadeNoChanges = false;
 
   for (let turn = 1; ; turn += 1) {
-    assertRepoUntouched(repo, fingerprint, workspace.root);
-    const measured = measureWorkspace(workspace);
-    if (turn === 1) editMadeNoChanges = measured.changes.length === 0 && !(measured.stray || []).length;
-
-    let prompt = renderPrompt("annotate", {
-      ...common,
-      PREFACE: owePreface ? renderPreface() : "",
-      CHANGES: renderChangesForPrompt(measured, memoryFile),
-    });
-    owePreface = false;
-    if (justRemeasured) prompt += REMEASURE_NOTICE;
-    else if (violationsToShow.length) prompt += rejectionBlock(violationsToShow);
-
-    const promptFile = path.join(promptDir, `synthesis-annotate-${turn}.md`);
-    fs.writeFileSync(promptFile, prompt);
-    progress("annotate", { attempt: attempts + 1, turn, changes: measured.changes.length });
-
-    const result = await holder.prompt({
-      promptFile,
-      approveAll: true,
-      timeoutSeconds,
-      promptRetries,
-    });
-    usage.push(usageRecord(holder.ranWith, result));
-    for (const note of result.notes || []) noteOnce(note);
-
-    // The agent may keep editing during an annotate turn; the ids it was answering about
-    // are then stale, so the answer is dropped and the fresh measurement shown instead.
-    // That is a measurement problem, not a failed annotation: it costs no attempt.
-    assertRepoUntouched(repo, fingerprint, workspace.root);
-    if (measureWorkspace(workspace).signature !== measured.signature) {
-      remeasures += 1;
-      justRemeasured = true;
-      violationsToShow = [];
-      if (remeasures >= REMEASURE_TURNS) {
-        terminal = { reason: "editing", violations: [KEPT_EDITING_VIOLATION] };
-        break;
-      }
-      warn(
-        `synthesis edited the staging copy again; re-measuring and re-annotating ` +
-          `(annotation attempt ${attempts + 1} of ${ANNOTATE_TURNS} is still unspent)`,
-      );
-      emitProgress("synth:remeasure", { turn, attempt: attempts + 1, remeasures });
-      continue;
-    }
-    justRemeasured = false;
-
-    // An empty turn is not a bad answer; it is no answer. Retry it once in a new session,
-    // because the accumulated context of this one is the likeliest reason it collapsed -
-    // unless the edit turn left nothing to describe in the first place, in which case a
-    // fresh session would be shown the same empty diff and retrying is pointless.
-    if (isBlankOutput(result.text)) {
-      if (turn === 1 && editMadeNoChanges) {
-        terminal = { reason: "edit-empty", violations: [EDIT_EMPTY_VIOLATION] };
-        break;
-      }
-      emptyTurns += 1;
-      if (emptyTurns > EMPTY_TURN_RETRIES) {
-        terminal = { reason: "empty", violations: [EMPTY_TURN_VIOLATION] };
-        break;
-      }
-      warn("synthesis ended its turn with no output; retrying the annotation once in a fresh session");
-      emitProgress("synth:empty", { turn, attempt: attempts + 1, emptyTurns });
-      await holder.session.close();
-      holder.session = await freshSession();
-      // The new session knows nothing, so it is given the preface; `violationsToShow` is
-      // kept because those gates are still what the run's annotation has to satisfy.
-      owePreface = true;
-      continue;
-    }
-
-    attempts += 1;
-    const parsed = extractJson(result.text);
-    if (!parsed) {
-      if (turn === 1 && editMadeNoChanges) {
-        terminal = { reason: "edit-empty", violations: [EDIT_EMPTY_VIOLATION] };
-        break;
-      }
-      violationsToShow = [UNPARSEABLE_VIOLATION];
-      if (attempts >= ANNOTATE_TURNS) {
-        terminal = { reason: "unparseable", violations: violationsToShow };
-        break;
-      }
-      warn(`synthesis violated 1 gate(s); re-prompting with the exact violations`);
-      emitProgress("synth:violations", { attempt: attempts, violations: violationsToShow });
-      continue;
-    }
-
-    const { proposal, violations } = buildProposal(parsed, { ...context, measured });
-    proposal.notes = [...proposal.notes, ...notes];
-    proposal.usage = usage;
-    proposal.overflowTarget = overflow;
-    proposal.attempt = attempts;
-    if (!violations.length) {
-      emitProgress("synth:done", { edits: proposal.edits.length, attempt: attempts });
-      return { proposal, violations: [] };
-    }
-
-    violationsToShow = violations;
-    proposal.violations = violations;
-    // Keep the rejected proposal so a loud failure is still inspectable. It records which
-    // attempt produced it, so a later empty turn cannot be reported as its author.
-    state.writeProposal(proposal);
-    saved = { attempt: attempts, violations, notes: proposal.notes };
-    if (attempts >= ANNOTATE_TURNS) {
-      terminal = { reason: "gates", violations };
+    const step = await annotateTurn(options, st, turn);
+    if (step.result) return step.result;
+    if (step.terminal) {
+      terminal = step.terminal;
       break;
     }
-    warn(`synthesis violated ${violations.length} gate(s); re-prompting with the exact violations`);
-    emitProgress("synth:violations", { attempt: attempts, violations });
   }
 
-  throw new ProposalViolation(terminalMessage(terminal.reason, attempts, terminal.violations), terminal.violations, {
+  throw new ProposalViolation(terminalMessage(terminal.reason, st.attempts, terminal.violations), terminal.violations, {
     reason: terminal.reason,
-    attempts,
-    saved,
-    proposalPath: saved ? state.proposalPath : null,
+    attempts: st.attempts,
+    saved: st.saved,
+    proposalPath: st.saved ? state.proposalPath : null,
   });
+}
+
+/**
+ * One annotate turn. Returns `{ result }` for a valid proposal, `{ terminal }` when the run
+ * has ended on a condition, or `{}` to take another turn.
+ */
+async function annotateTurn(env, st, turn) {
+  const { holder, workspace, fingerprint, repo, context, timeoutSeconds, promptRetries, usage, noteOnce, progress } =
+    env;
+  assertRepoUntouched(repo, fingerprint, workspace.root);
+  const measured = measureWorkspace(workspace);
+  if (turn === 1) st.editMadeNoChanges = measured.changes.length === 0 && !(measured.stray || []).length;
+
+  const promptFile = writeAnnotatePrompt(env, st, measured, turn);
+  progress("annotate", { attempt: st.attempts + 1, turn, changes: measured.changes.length });
+
+  const result = await holder.prompt({
+    promptFile,
+    approveAll: true,
+    timeoutSeconds,
+    promptRetries,
+  });
+  usage.push(usageRecord(holder.ranWith, result));
+  for (const note of result.notes || []) noteOnce(note);
+
+  // The agent may keep editing during an annotate turn; the ids it was answering about
+  // are then stale, so the answer is dropped and the fresh measurement shown instead.
+  // That is a measurement problem, not a failed annotation: it costs no attempt.
+  assertRepoUntouched(repo, fingerprint, workspace.root);
+  if (measureWorkspace(workspace).signature !== measured.signature) return noteRemeasure(st, turn);
+  st.justRemeasured = false;
+
+  // An empty turn is not a bad answer; it is no answer. Retry it once in a new session,
+  // because the accumulated context of this one is the likeliest reason it collapsed -
+  // unless the edit turn left nothing to describe in the first place, in which case a
+  // fresh session would be shown the same empty diff and retrying is pointless.
+  if (isBlankOutput(result.text)) return handleBlankTurn(env, st, turn);
+
+  st.attempts += 1;
+  const parsed = extractJson(result.text);
+  if (!parsed) return rejectUnparseable(st, turn);
+
+  const { proposal, violations } = buildProposal(parsed, { ...context, measured });
+  proposal.notes = [...proposal.notes, ...env.notes];
+  proposal.usage = env.usage;
+  proposal.overflowTarget = env.overflow;
+  proposal.attempt = st.attempts;
+  if (!violations.length) {
+    emitProgress("synth:done", { edits: proposal.edits.length, attempt: st.attempts });
+    return { result: { proposal, violations: [] } };
+  }
+  return rejectProposal(context.config.state, st, proposal, violations);
+}
+
+function writeAnnotatePrompt(env, st, measured, turn) {
+  let prompt = renderPrompt("annotate", {
+    ...env.common,
+    PREFACE: st.owePreface ? env.renderPreface() : "",
+    CHANGES: renderChangesForPrompt(measured, env.context.memoryFile),
+  });
+  st.owePreface = false;
+  if (st.justRemeasured) prompt += REMEASURE_NOTICE;
+  else if (st.violationsToShow.length) prompt += rejectionBlock(st.violationsToShow);
+
+  const promptFile = path.join(env.promptDir, `synthesis-annotate-${turn}.md`);
+  fs.writeFileSync(promptFile, prompt);
+  return promptFile;
+}
+
+function noteRemeasure(st, turn) {
+  st.remeasures += 1;
+  st.justRemeasured = true;
+  st.violationsToShow = [];
+  if (st.remeasures >= REMEASURE_TURNS) {
+    return { terminal: { reason: "editing", violations: [KEPT_EDITING_VIOLATION] } };
+  }
+  warn(
+    `synthesis edited the staging copy again; re-measuring and re-annotating ` +
+      `(annotation attempt ${st.attempts + 1} of ${ANNOTATE_TURNS} is still unspent)`,
+  );
+  emitProgress("synth:remeasure", { turn, attempt: st.attempts + 1, remeasures: st.remeasures });
+  return {};
+}
+
+async function handleBlankTurn({ holder, freshSession }, st, turn) {
+  if (turn === 1 && st.editMadeNoChanges) {
+    return { terminal: { reason: "edit-empty", violations: [EDIT_EMPTY_VIOLATION] } };
+  }
+  st.emptyTurns += 1;
+  if (st.emptyTurns > EMPTY_TURN_RETRIES) {
+    return { terminal: { reason: "empty", violations: [EMPTY_TURN_VIOLATION] } };
+  }
+  warn("synthesis ended its turn with no output; retrying the annotation once in a fresh session");
+  emitProgress("synth:empty", { turn, attempt: st.attempts + 1, emptyTurns: st.emptyTurns });
+  await holder.session.close();
+  holder.session = await freshSession();
+  // The new session knows nothing, so it is given the preface; `violationsToShow` is
+  // kept because those gates are still what the run's annotation has to satisfy.
+  st.owePreface = true;
+  return {};
+}
+
+function rejectUnparseable(st, turn) {
+  if (turn === 1 && st.editMadeNoChanges) {
+    return { terminal: { reason: "edit-empty", violations: [EDIT_EMPTY_VIOLATION] } };
+  }
+  st.violationsToShow = [UNPARSEABLE_VIOLATION];
+  if (st.attempts >= ANNOTATE_TURNS) {
+    return { terminal: { reason: "unparseable", violations: st.violationsToShow } };
+  }
+  warn(`synthesis violated 1 gate(s); re-prompting with the exact violations`);
+  emitProgress("synth:violations", { attempt: st.attempts, violations: st.violationsToShow });
+  return {};
+}
+
+function rejectProposal(state, st, proposal, violations) {
+  st.violationsToShow = violations;
+  proposal.violations = violations;
+  // Keep the rejected proposal so a loud failure is still inspectable. It records which
+  // attempt produced it, so a later empty turn cannot be reported as its author.
+  state.writeProposal(proposal);
+  st.saved = { attempt: st.attempts, violations, notes: proposal.notes };
+  if (st.attempts >= ANNOTATE_TURNS) return { terminal: { reason: "gates", violations } };
+  warn(`synthesis violated ${violations.length} gate(s); re-prompting with the exact violations`);
+  emitProgress("synth:violations", { attempt: st.attempts, violations });
+  return {};
+}
+
+function noteOnceFor(notes) {
+  return (note) => {
+    // The same adapter limitation is reported on every turn; say it once.
+    if (notes.includes(note)) return;
+    notes.push(note);
+    warn(note);
+  };
+}
+
+/** " (model) effort=x" suffix for a resolved agent pick; empty parts are left out. */
+function pickDetail(pick) {
+  const modelNote = pick.model ? ` (${pick.model})` : "";
+  const effortNote = pick.effort ? ` effort=${pick.effort}` : "";
+  return `${modelNote}${effortNote}`;
+}
+
+/** Which existing skill files staging copies: all on a surface run, none on a memory target, one on a skill. */
+function stagedSkillSelection(target) {
+  if (target.kind === "surface") return null;
+  if (target.kind === "skill") return [target.path];
+  return [];
+}
+
+function buildEditValues({
+  common,
+  target,
+  workspace,
+  stagedSkillsDir,
+  stagedSkillFiles,
+  repo,
+  summary,
+  runNote,
+  harnessCounts,
+  memoryFile,
+  config,
+  descriptionTokens,
+  rejections,
+}) {
+  const stagedTargetPath =
+    target.kind === "skill" ? workspace.stagedPaths.get(target.path) || workspacePathFor(target.path) : null;
+  return {
+    ...common,
+    TARGET_RULE: targetRule(
+      target,
+      workspace.memoryWorkspacePath,
+      stagedSkillsDir,
+      stagedTargetPath,
+      stagedSkillFiles.filter((skill) => skill.readOnly),
+    ),
+    REPO_NAME: repo.name,
+    REPO_ROOT: repo.root,
+    TRANSCRIPT_COUNT: String(summary.analyzedSessions),
+    RUN_NOTE: runNote,
+    HARNESS_SUMMARY:
+      Object.entries(harnessCounts)
+        .map(([h, n]) => `${h} ${n}`)
+        .join(" · ") || "none",
+    CURRENT_TOKENS: String(memoryFile.tokens + descriptionTokens),
+    BUDGET_TOKENS: String(config.budgetTokens),
+    BUDGET_STATE: budgetState(memoryFile, config, descriptionTokens),
+    INSTRUCTION_INDEX: renderInstructionIndex(memoryFile),
+    SKILLS_DIR: stagedSkillsDir,
+    SKILL_INDEX: renderSkillIndex(stagedSkillFiles),
+    EVIDENCE: renderEvidenceForPrompt(summary),
+    REJECTIONS: renderRejections(rejections),
+  };
 }
 
 export async function synthesizeProposal({
@@ -514,9 +590,7 @@ export async function synthesizeProposal({
 
   // Staging holds only the write surface: every skill on a surface run, none of them on
   // a memory-file target (new extracts are still measured), just the one on a skill target.
-  let stagedSkills = [];
-  if (target.kind === "surface") stagedSkills = null;
-  else if (target.kind === "skill") stagedSkills = [target.path];
+  const stagedSkills = stagedSkillSelection(target);
   const workspaceOptions = {
     state,
     repo,
@@ -541,32 +615,21 @@ export async function synthesizeProposal({
     readOnly: readOnlyReason(skill.path),
   }));
 
-  const editValues = {
-    ...common,
-    TARGET_RULE: targetRule(
-      target,
-      workspace.memoryWorkspacePath,
-      stagedSkillsDir,
-      target.kind === "skill" ? workspace.stagedPaths.get(target.path) || workspacePathFor(target.path) : null,
-      stagedSkillFiles.filter((skill) => skill.readOnly),
-    ),
-    REPO_NAME: repo.name,
-    REPO_ROOT: repo.root,
-    TRANSCRIPT_COUNT: String(summary.analyzedSessions),
-    RUN_NOTE: runNote,
-    HARNESS_SUMMARY:
-      Object.entries(harnessCounts)
-        .map(([h, n]) => `${h} ${n}`)
-        .join(" · ") || "none",
-    CURRENT_TOKENS: String(memoryFile.tokens + descriptionTokens),
-    BUDGET_TOKENS: String(config.budgetTokens),
-    BUDGET_STATE: budgetState(memoryFile, config, descriptionTokens),
-    INSTRUCTION_INDEX: renderInstructionIndex(memoryFile),
-    SKILLS_DIR: stagedSkillsDir,
-    SKILL_INDEX: renderSkillIndex(stagedSkillFiles),
-    EVIDENCE: renderEvidenceForPrompt(summary),
-    REJECTIONS: renderRejections(rejections),
-  };
+  const editValues = buildEditValues({
+    common,
+    target,
+    workspace,
+    stagedSkillsDir,
+    stagedSkillFiles,
+    repo,
+    summary,
+    runNote,
+    harnessCounts,
+    memoryFile,
+    config,
+    descriptionTokens,
+    rejections,
+  });
 
   const editPromptFile = path.join(promptDir, "synthesis-edit.md");
   fs.writeFileSync(editPromptFile, renderPrompt("synthesis", editValues));
@@ -579,17 +642,10 @@ export async function synthesizeProposal({
   const timeoutSeconds = Math.max(config.timeoutSeconds, 900);
   const usage = [];
   const notes = [];
-  const noteOnce = (note) => {
-    // The same adapter limitation is reported on every turn; say it once.
-    if (notes.includes(note)) return;
-    notes.push(note);
-    warn(note);
-  };
+  const noteOnce = noteOnceFor(notes);
 
   const pick = await config.agents.resolve("synthesis");
-  const modelNote = pick.model ? ` (${pick.model})` : "";
-  const effortNote = pick.effort ? ` effort=${pick.effort}` : "";
-  info(`${color.cyan("·")} synthesizing with ${pick.agent}${modelNote}${effortNote}`);
+  info(`${color.cyan("·")} synthesizing with ${pick.agent}${pickDetail(pick)}`);
   let ranWith = pick.agent;
   let chosen = pick;
   const progress = (phase, extra = {}) =>

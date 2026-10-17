@@ -77,6 +77,32 @@ function skillSurfaces(skill) {
   return surfaces;
 }
 
+function bestHitForUnit(unit, memoryFile, catalog, threshold) {
+  const prepared = preparedUnit(unit.text);
+  let best = null;
+  for (const candidate of catalog) {
+    const score = overlapScore(prepared, candidate);
+    if (score < threshold || !beatsBest(best, candidate, score)) continue;
+    best = {
+      instruction: unit.id,
+      tokens: unit.tokens,
+      skill: candidate.skill,
+      path: candidate.path,
+      surface: candidate.surface,
+      score,
+      ...(memoryFile.path ? { memoryPath: memoryFile.path } : {}),
+    };
+  }
+  return best;
+}
+
+/** A description match beats body matches; within one surface the higher score wins. */
+function beatsBest(best, candidate, score) {
+  if (!best) return true;
+  if (candidate.surface === "description" && best.surface !== "description") return true;
+  return candidate.surface === best.surface && score > best.score;
+}
+
 /**
  * Memory-file units whose normalized text substantially overlaps a skill description
  * or body. One preferred hit per unit: a qualifying description match wins over body
@@ -103,27 +129,7 @@ export function crossSurfaceDuplicates(memoryFile, skills = [], threshold = CROS
 
   const hits = [];
   for (const unit of units) {
-    const prepared = preparedUnit(unit.text);
-    let best = null;
-    for (const candidate of catalog) {
-      const score = overlapScore(prepared, candidate);
-      if (score < threshold) continue;
-      if (
-        !best ||
-        (candidate.surface === "description" && best.surface !== "description") ||
-        (candidate.surface === best.surface && score > best.score)
-      ) {
-        best = {
-          instruction: unit.id,
-          tokens: unit.tokens,
-          skill: candidate.skill,
-          path: candidate.path,
-          surface: candidate.surface,
-          score,
-          ...(memoryFile.path ? { memoryPath: memoryFile.path } : {}),
-        };
-      }
-    }
+    const best = bestHitForUnit(unit, memoryFile, catalog, threshold);
     if (best) hits.push(best);
   }
   return hits;

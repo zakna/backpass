@@ -47,6 +47,38 @@ export function isDirectoryEntry(root, entry) {
   }
 }
 
+/** One directory entry as a skill, or null when it is not one or cannot be read. */
+function readSkillEntry(repoRoot, root, entry) {
+  // A harness loads what the path resolves to, so a symlinked skill directory is a skill.
+  // `readdir` reports the link itself, never its target, so the type has to be stat'd -
+  // otherwise a library-plus-symlinks layout (the common way to share skills across
+  // harnesses) is invisible here and its always-loaded descriptions go unbilled.
+  let file = null;
+  if (isDirectoryEntry(root, entry)) file = path.join(root, entry.name, "SKILL.md");
+  else if (entry.name.endsWith(".md")) file = path.join(root, entry.name);
+  if (!file || !fs.existsSync(file)) return null;
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  const frontmatter = parseFrontmatter(text);
+  return {
+    name: frontmatter.name || entry.name.replace(/\.md$/, ""),
+    description: frontmatter.description || "",
+    path: repoRelativeOrAbsolute(repoRoot, file),
+    body: skillBody(text),
+    bodyTokens: estimateTokens(text),
+    descriptionTokens: estimateTokens(frontmatter.description || ""),
+  };
+}
+
+function repoRelativeOrAbsolute(repoRoot, file) {
+  const relative = path.relative(repoRoot, file);
+  return relative.startsWith("..") || path.isAbsolute(relative) ? file : relative.split(path.sep).join("/");
+}
+
 /** Read the existing skills so synthesis can tune a description instead of duplicating it. */
 export function loadSkills(repoRoot, skillsDir) {
   const root = path.isAbsolute(skillsDir) ? skillsDir : path.join(repoRoot, skillsDir);
@@ -61,35 +93,20 @@ export function loadSkills(repoRoot, skillsDir) {
   }
 
   for (const entry of entries) {
-    // A harness loads what the path resolves to, so a symlinked skill directory is a skill.
-    // `readdir` reports the link itself, never its target, so the type has to be stat'd -
-    // otherwise a library-plus-symlinks layout (the common way to share skills across
-    // harnesses) is invisible here and its always-loaded descriptions go unbilled.
-    let file = null;
-    if (isDirectoryEntry(root, entry)) file = path.join(root, entry.name, "SKILL.md");
-    else if (entry.name.endsWith(".md")) file = path.join(root, entry.name);
-    if (!file || !fs.existsSync(file)) continue;
-    let text;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      continue;
-    }
-    const frontmatter = parseFrontmatter(text);
-    skills.push({
-      name: frontmatter.name || entry.name.replace(/\.md$/, ""),
-      description: frontmatter.description || "",
-      path: (() => {
-        const relative = path.relative(repoRoot, file);
-        return relative.startsWith("..") || path.isAbsolute(relative) ? file : relative.split(path.sep).join("/");
-      })(),
-      body: skillBody(text),
-      bodyTokens: estimateTokens(text),
-      descriptionTokens: estimateTokens(frontmatter.description || ""),
-    });
+    const skill = readSkillEntry(repoRoot, root, entry);
+    if (skill) skills.push(skill);
   }
 
   return skills.sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
+}
+
+/** The real path of an existing directory, or null when it cannot be resolved. */
+function realIdentity(absolute) {
+  try {
+    return fs.realpathSync(absolute);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -113,15 +130,8 @@ export function resolveProjectSkillDirs(
     const absolute = path.isAbsolute(dir) ? dir : path.join(repoRoot, dir);
     const exists = fs.existsSync(absolute);
     if (!exists && dir !== overflowDir) continue;
-    let identity = path.resolve(absolute);
-    if (exists) {
-      try {
-        identity = fs.realpathSync(absolute);
-      } catch {
-        continue;
-      }
-    }
-    if (seen.has(identity)) continue;
+    const identity = exists ? realIdentity(absolute) : path.resolve(absolute);
+    if (identity === null || seen.has(identity)) continue;
     seen.add(identity);
     dirs.push(logicalSkillDir(repoRoot, dir));
   }
@@ -173,48 +183,64 @@ export function parseFrontmatter(text) {
   const match = /^---\n([\s\S]*?)\n---/.exec(text);
   if (!match) return {};
   const result = {};
-  let currentKey = null;
-  let block = null;
-
-  const finishBlock = () => {
-    if (!block) return;
-    const lines = block.lines;
-    let value;
-    if (block.style === "|") {
-      value = lines.length ? `${lines.join("\n")}\n` : "";
-    } else {
-      value = foldBlockLines(lines);
-    }
-    if (block.chomp === "-") value = value.replace(/\n+$/, "");
-    if (block.chomp === "") value = value.replace(/\n*$/, lines.some(Boolean) ? "\n" : "");
-    result[block.key] = value;
-    block = null;
-  };
+  const state = { currentKey: null, block: null };
 
   for (const line of match[1].split("\n")) {
     const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
     if (kv) {
-      finishBlock();
-      currentKey = kv[1];
-      const rawValue = kv[2].trim();
-      const blockIndicator = /^([>|])([+-]?)$/.exec(rawValue);
-      if (blockIndicator) {
-        result[currentKey] = "";
-        block = { key: currentKey, style: blockIndicator[1], chomp: blockIndicator[2], indent: null, lines: [] };
-      } else {
-        result[currentKey] = rawValue.replaceAll(/^["']|["']$/g, "");
-      }
-    } else if (block && /^\s*$/.test(line)) {
-      block.lines.push("");
-    } else if (block && /^\s+\S/.test(line)) {
-      if (block.indent === null) block.indent = /^\s+/.exec(line)[0].length;
-      block.lines.push(line.slice(block.indent));
-    } else if (currentKey && !block && /^\s+\S/.test(line)) {
-      result[currentKey] = `${result[currentKey]} ${line.trim()}`.trim();
+      finishBlock(result, state);
+      beginKey(result, state, kv);
+    } else if (state.block) {
+      continueBlock(state.block, line);
+    } else if (state.currentKey && /^\s+\S/.test(line)) {
+      result[state.currentKey] = `${result[state.currentKey]} ${line.trim()}`.trim();
     }
   }
-  finishBlock();
+  finishBlock(result, state);
   return result;
+}
+
+function finishBlock(result, state) {
+  const { block } = state;
+  if (!block) return;
+  const lines = block.lines;
+  let value;
+  if (block.style === "|") {
+    value = lines.length ? `${lines.join("\n")}\n` : "";
+  } else {
+    value = foldBlockLines(lines);
+  }
+  if (block.chomp === "-") value = value.replace(/\n+$/, "");
+  if (block.chomp === "") value = value.replace(/\n*$/, lines.some(Boolean) ? "\n" : "");
+  result[block.key] = value;
+  state.block = null;
+}
+
+function beginKey(result, state, kv) {
+  state.currentKey = kv[1];
+  const rawValue = kv[2].trim();
+  const blockIndicator = /^([>|])([+-]?)$/.exec(rawValue);
+  if (blockIndicator) {
+    result[state.currentKey] = "";
+    state.block = {
+      key: state.currentKey,
+      style: blockIndicator[1],
+      chomp: blockIndicator[2],
+      indent: null,
+      lines: [],
+    };
+  } else {
+    result[state.currentKey] = rawValue.replaceAll(/^["']|["']$/g, "");
+  }
+}
+
+function continueBlock(block, line) {
+  if (/^\s*$/.test(line)) {
+    block.lines.push("");
+  } else if (/^\s+\S/.test(line)) {
+    if (block.indent === null) block.indent = /^\s+/.exec(line)[0].length;
+    block.lines.push(line.slice(block.indent));
+  }
 }
 
 function foldBlockLines(lines) {
@@ -446,65 +472,66 @@ export function removeOwnedSkillPaths(paths) {
   const removed = [];
   const conflicts = [];
   for (const item of [...paths].reverse()) {
-    let stat;
-    try {
-      stat = fs.lstatSync(item.absolute);
-    } catch {
-      continue;
-    }
-    const observed = pathIdentity(stat);
-    if (observed.dev !== item.identity.dev || observed.ino !== item.identity.ino) {
-      conflicts.push(item);
-      continue;
-    }
-    if (item.text !== undefined) {
-      let text;
-      try {
-        text = fs.readFileSync(item.absolute, "utf8");
-      } catch {
-        conflicts.push(item);
-        continue;
-      }
-      if (text !== item.text) {
-        conflicts.push(item);
-        continue;
-      }
-    }
-
-    // Move the pathname out of the way atomically, then validate the object that was
-    // actually moved. A second pathname check followed by unlink would let a concurrent
-    // replacement slip between those operations and be deleted as if it were ours.
-    const quarantine = path.join(
-      path.dirname(item.absolute),
-      `.${path.basename(item.absolute)}.backpass-rollback-${randomUUID()}`,
-    );
-    let quarantined = false;
-    try {
-      fs.renameSync(item.absolute, quarantine);
-      quarantined = true;
-      const moved = pathIdentity(fs.lstatSync(quarantine));
-      const identityMatches = moved.dev === item.identity.dev && moved.ino === item.identity.ino;
-      const textMatches = item.text === undefined || fs.readFileSync(quarantine, "utf8") === item.text;
-      if (identityMatches && textMatches) {
-        fs.unlinkSync(quarantine);
-        removed.push(item);
-        continue;
-      }
-
-      restoreQuarantinedPath(quarantine, item.absolute);
-      conflicts.push(item);
-    } catch {
-      if (quarantined) {
-        try {
-          restoreQuarantinedPath(quarantine, item.absolute);
-        } catch {
-          fs.existsSync(quarantine);
-        }
-      }
-      conflicts.push(item);
-    }
+    const outcome = removeOwnedPath(item);
+    if (outcome === "removed") removed.push(item);
+    else if (outcome === "conflict") conflicts.push(item);
   }
   return { removed, conflicts };
+}
+
+/** "removed", "conflict" (left alone), or "missing" (nothing there to remove). */
+function removeOwnedPath(item) {
+  let stat;
+  try {
+    stat = fs.lstatSync(item.absolute);
+  } catch {
+    return "missing";
+  }
+  if (!stillOwned(item, stat)) return "conflict";
+
+  // Move the pathname out of the way atomically, then validate the object that was
+  // actually moved. A second pathname check followed by unlink would let a concurrent
+  // replacement slip between those operations and be deleted as if it were ours.
+  const quarantine = path.join(
+    path.dirname(item.absolute),
+    `.${path.basename(item.absolute)}.backpass-rollback-${randomUUID()}`,
+  );
+  let quarantined = false;
+  try {
+    fs.renameSync(item.absolute, quarantine);
+    quarantined = true;
+    const moved = pathIdentity(fs.lstatSync(quarantine));
+    const identityMatches = moved.dev === item.identity.dev && moved.ino === item.identity.ino;
+    const textMatches = item.text === undefined || fs.readFileSync(quarantine, "utf8") === item.text;
+    if (identityMatches && textMatches) {
+      fs.unlinkSync(quarantine);
+      return "removed";
+    }
+
+    restoreQuarantinedPath(quarantine, item.absolute);
+    return "conflict";
+  } catch {
+    if (quarantined) {
+      try {
+        restoreQuarantinedPath(quarantine, item.absolute);
+      } catch {
+        fs.existsSync(quarantine);
+      }
+    }
+    return "conflict";
+  }
+}
+
+/** Whether the path still holds the object (and, for files, the text) this round created. */
+function stillOwned(item, stat) {
+  const observed = pathIdentity(stat);
+  if (observed.dev !== item.identity.dev || observed.ino !== item.identity.ino) return false;
+  if (item.text === undefined) return true;
+  try {
+    return fs.readFileSync(item.absolute, "utf8") === item.text;
+  } catch {
+    return false;
+  }
 }
 
 /**

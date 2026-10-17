@@ -40,21 +40,28 @@ export function enumerate({ cutoffMs } = {}) {
     for (const month of shardDirs(year)) {
       for (const day of shardDirs(month)) {
         if (cutoffMs && dayIsBefore(root, day, cutoffMs)) continue;
-        let files;
-        try {
-          files = fs.readdirSync(day, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of files) {
-          if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
-          const file = path.join(day, entry.name);
-          const stat = statOrNull(file);
-          if (!stat) continue;
-          out.push({ key: file, path: file, mtimeMs: stat.mtimeMs, bytes: stat.size });
-        }
+        out.push(...rolloutsIn(day));
       }
     }
+  }
+  return out;
+}
+
+/** The rollout files of one day directory; an unreadable directory contributes none. */
+function rolloutsIn(day) {
+  let files;
+  try {
+    files = fs.readdirSync(day, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const entry of files) {
+    if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
+    const file = path.join(day, entry.name);
+    const stat = statOrNull(file);
+    if (!stat) continue;
+    out.push({ key: file, path: file, mtimeMs: stat.mtimeMs, bytes: stat.size });
   }
   return out;
 }

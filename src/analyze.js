@@ -72,55 +72,74 @@ export function sanitizeEvidence(parsed, memoryFile = null, trace = null) {
 
   const validInstructions = memoryFile ? new Set(instructionUnits(memoryFile).map((unit) => unit.id)) : null;
   const foldedTrace = typeof trace === "string" && !clean.usedRawTranscript ? foldSpace(trace) : null;
-  const hasQuote = (item) => {
+  const hasQuote = quoteChecker(clean, foldedTrace);
+
+  for (const key of ["positive", "negative"]) {
+    sanitizeJudgments(clean, parsed[key], key, hasQuote, validInstructions);
+  }
+  for (const item of asArray(parsed.gaps)) {
+    if (!hasQuote(item) || typeof item.proposedInstruction !== "string") continue;
+    clean.gaps.push(sanitizeGap(item));
+  }
+
+  return clean;
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function sanitizeJudgments(clean, items, key, hasQuote, validInstructions) {
+  for (const item of asArray(items)) {
+    if (!hasQuote(item) || typeof item.instruction !== "string") continue;
+    const instruction = item.instruction.trim();
+    if (validInstructions && !validInstructions.has(instruction)) continue;
+    clean[key].push(sanitizeJudgment(key, item, instruction));
+  }
+}
+
+function quoteChecker(clean, foldedTrace) {
+  return (item) => {
     if (typeof item?.quote !== "string" || item.quote.trim().length < 8) return false;
     if (foldedTrace === null || foldedTrace.includes(foldSpace(item.quote))) return true;
     clean.quotesNotInTrace += 1;
     return false;
   };
+}
 
-  for (const key of ["positive", "negative"]) {
-    for (const item of Array.isArray(parsed[key]) ? parsed[key] : []) {
-      if (!hasQuote(item) || typeof item.instruction !== "string") continue;
-      const instruction = item.instruction.trim();
-      if (validInstructions && !validInstructions.has(instruction)) continue;
-      const entry = {
-        instruction,
-        moment: String(item.moment ?? "").slice(0, 80),
-        effect: String(item.effect ?? "").slice(0, 400),
-        quote: item.quote.trim().slice(0, 600),
-      };
-      // The class is what keeps "the agent skipped the rule" from being read as "the
-      // rule caused harm" downstream. Only an explicit judged value is kept; records
-      // from before the field existed simply carry none, and none never counts as harm.
-      if (key === "negative" && NEGATIVE_CLASSES.includes(item.class)) entry.class = item.class;
-      clean[key].push(entry);
-    }
+function sanitizeJudgment(key, item, instruction) {
+  const entry = {
+    instruction,
+    moment: String(item.moment ?? "").slice(0, 80),
+    effect: String(item.effect ?? "").slice(0, 400),
+    quote: item.quote.trim().slice(0, 600),
+  };
+  // The class is what keeps "the agent skipped the rule" from being read as "the
+  // rule caused harm" downstream. Only an explicit judged value is kept; records
+  // from before the field existed simply carry none, and none never counts as harm.
+  if (key === "negative" && NEGATIVE_CLASSES.includes(item.class)) entry.class = item.class;
+  return entry;
+}
+
+function sanitizeGap(item) {
+  const gap = {
+    mistake: String(item.mistake ?? "").slice(0, 400),
+    proposedInstruction: item.proposedInstruction.trim().slice(0, 400),
+    recurrenceRisk: ["high", "medium", "low"].includes(item.recurrenceRisk) ? item.recurrenceRisk : "medium",
+    quote: item.quote.trim().slice(0, 600),
+    domain: item.domain === "orchestration" ? "orchestration" : "project",
+  };
+  if (typeof item.matchesGap === "string" && /^[0-9a-f]{16}$/.test(item.matchesGap.trim())) {
+    gap.matchesGap = item.matchesGap.trim();
   }
-
-  for (const item of Array.isArray(parsed.gaps) ? parsed.gaps : []) {
-    if (!hasQuote(item) || typeof item.proposedInstruction !== "string") continue;
-    const gap = {
-      mistake: String(item.mistake ?? "").slice(0, 400),
-      proposedInstruction: item.proposedInstruction.trim().slice(0, 400),
-      recurrenceRisk: ["high", "medium", "low"].includes(item.recurrenceRisk) ? item.recurrenceRisk : "medium",
-      quote: item.quote.trim().slice(0, 600),
-      domain: item.domain === "orchestration" ? "orchestration" : "project",
-    };
-    if (typeof item.matchesGap === "string" && /^[0-9a-f]{16}$/.test(item.matchesGap.trim())) {
-      gap.matchesGap = item.matchesGap.trim();
-    }
-    // A failed trigger: an existing skill's content would have prevented the mistake,
-    // but the skill was not in play. Kept as a judged citation so the fold can count
-    // failed triggers per skill; an absent or empty value simply means "no skill covers
-    // this" and records nothing.
-    if (typeof item.coveredBySkill === "string" && item.coveredBySkill.trim()) {
-      gap.coveredBySkill = item.coveredBySkill.trim().slice(0, 120);
-    }
-    clean.gaps.push(gap);
+  // A failed trigger: an existing skill's content would have prevented the mistake,
+  // but the skill was not in play. Kept as a judged citation so the fold can count
+  // failed triggers per skill; an absent or empty value simply means "no skill covers
+  // this" and records nothing.
+  if (typeof item.coveredBySkill === "string" && item.coveredBySkill.trim()) {
+    gap.coveredBySkill = item.coveredBySkill.trim().slice(0, 120);
   }
-
-  return clean;
+  return gap;
 }
 
 /**
@@ -263,6 +282,94 @@ async function pool(items, limit, worker) {
   return results;
 }
 
+const transcriptMetadata = (transcript) => ({
+  harness: transcript.harness,
+  id: transcript.id,
+  identity: transcriptIdentity(transcript),
+  path: transcript.path,
+  mtimeMs: transcript.mtimeMs,
+  bytes: transcript.bytes,
+  startedAt: transcript.startedAt,
+  association: transcript.association,
+  interaction: classifyInteraction(transcript),
+  cwd: transcript.cwd || null,
+  project: transcript.project || null,
+  projectRoot: transcript.projectRoot || null,
+  host: transcript.host || null,
+});
+
+/** Rewrite a cached record's transcript metadata in place when discovery learned something new. */
+function refreshCachedMetadata(state, transcript, existing) {
+  const updatedTranscript = { ...existing.transcript, ...transcriptMetadata(transcript) };
+  if (JSON.stringify(existing.transcript) !== JSON.stringify(updatedTranscript)) {
+    state.writeEvidence(transcript, { ...existing, transcript: updatedTranscript });
+  }
+}
+
+/** Skill paths as the analysis model sees them: absolute when it runs outside the repo. */
+function rebaseSkillPaths(skills, modelCwd, repo) {
+  if (!modelCwd || path.resolve(modelCwd) === path.resolve(repo.root)) return skills;
+  return skills.map((skill) => ({
+    ...skill,
+    path: path.isAbsolute(skill.path) ? skill.path : path.join(repo.root, skill.path),
+  }));
+}
+
+/** Count the fresh-cached transcripts into the summary and return the ones still to analyze. */
+function splitCachedTranscripts({ transcripts, state, summary, priorHashes, memoryHash, force }) {
+  const pending = [];
+  for (const transcript of transcripts) {
+    const existing = state.readEvidence(transcript);
+    if (!force && isEvidenceFresh(existing, transcript, memoryHash)) {
+      refreshCachedMetadata(state, transcript, existing);
+      summary.cached += 1;
+      continue;
+    }
+    // Distinguish "no prior evidence" from "prior evidence exists, but it was judged
+    // against a memory surface that no longer matches" - a re-analysis here, not a miss.
+    if (existing?.status === "ok" && existing.memoryHash && existing.memoryHash !== memoryHash) {
+      summary.staleMemoryHash += 1;
+      priorHashes.add(existing.memoryHash);
+    }
+    pending.push(transcript);
+  }
+  return pending;
+}
+
+function recordAnalysisResult({ state, summary, evidenceTotals, transcript, base, result }) {
+  if (result.status === "skipped") {
+    summary.skipped += 1;
+    state.writeEvidence(transcript, { ...base, status: "skipped", reason: result.reason });
+    return;
+  }
+  summary.analyzed += 1;
+  summary.usage.push(result.usage);
+  state.writeEvidence(transcript, {
+    ...base,
+    status: "ok",
+    stats: result.distilled.stats,
+    ...result.evidence,
+  });
+  evidenceTotals.positive += result.evidence.positive.length;
+  evidenceTotals.negative += result.evidence.negative.length;
+  evidenceTotals.gaps += result.evidence.gaps.length;
+  summary.quotesNotInTrace += result.evidence.quotesNotInTrace;
+  emitProgress("analyze:evidence", { ...evidenceTotals });
+}
+
+function reportTick(summary, slot, done, total) {
+  emitProgress("analyze:tick", {
+    slot,
+    done,
+    ok: summary.analyzed,
+    skipped: summary.skipped,
+    failed: summary.failed,
+  });
+  if (done % 10 === 0 || done === total) {
+    info(color.dim(`  ${done}/${total} analyzed`));
+  }
+}
+
 export async function analyzeTranscripts({
   transcripts,
   memoryFile,
@@ -287,40 +394,7 @@ export async function analyzeTranscripts({
     quotesNotInTrace: 0,
   };
   const priorHashes = new Set();
-  const transcriptMetadata = (transcript) => ({
-    harness: transcript.harness,
-    id: transcript.id,
-    identity: transcriptIdentity(transcript),
-    path: transcript.path,
-    mtimeMs: transcript.mtimeMs,
-    bytes: transcript.bytes,
-    startedAt: transcript.startedAt,
-    association: transcript.association,
-    interaction: classifyInteraction(transcript),
-    cwd: transcript.cwd || null,
-    project: transcript.project || null,
-    projectRoot: transcript.projectRoot || null,
-    host: transcript.host || null,
-  });
-
-  for (const transcript of transcripts) {
-    const existing = state.readEvidence(transcript);
-    if (!force && isEvidenceFresh(existing, transcript, memoryHash)) {
-      const updatedTranscript = { ...existing.transcript, ...transcriptMetadata(transcript) };
-      if (JSON.stringify(existing.transcript) !== JSON.stringify(updatedTranscript)) {
-        state.writeEvidence(transcript, { ...existing, transcript: updatedTranscript });
-      }
-      summary.cached += 1;
-      continue;
-    }
-    // Distinguish "no prior evidence" from "prior evidence exists, but it was judged
-    // against a memory surface that no longer matches" - a re-analysis here, not a miss.
-    if (existing?.status === "ok" && existing.memoryHash && existing.memoryHash !== memoryHash) {
-      summary.staleMemoryHash += 1;
-      priorHashes.add(existing.memoryHash);
-    }
-    pending.push(transcript);
-  }
+  pending.push(...splitCachedTranscripts({ transcripts, state, summary, priorHashes, memoryHash, force }));
 
   if (summary.staleMemoryHash) {
     info(
@@ -364,14 +438,7 @@ export async function analyzeTranscripts({
   // the skill index, so a mistake an existing skill's content covers is reported as a
   // failed trigger (`coveredBySkill`) instead of a brand-new gap.
   const openGapIndex = renderOpenGapIndex(state.readGapLedger(), memoryFile.path);
-  const skillIndex = renderSkillIndexForAnalysis(
-    modelCwd && path.resolve(modelCwd) !== path.resolve(repo.root)
-      ? skills.map((skill) => ({
-          ...skill,
-          path: path.isAbsolute(skill.path) ? skill.path : path.join(repo.root, skill.path),
-        }))
-      : skills,
-  );
+  const skillIndex = renderSkillIndexForAnalysis(rebaseSkillPaths(skills, modelCwd, repo));
 
   let done = 0;
   const evidenceTotals = { positive: 0, negative: 0, gaps: 0 };
@@ -404,24 +471,7 @@ export async function analyzeTranscripts({
         skillIndex,
         selectedAgent: pick.agent,
       });
-      if (result.status === "skipped") {
-        summary.skipped += 1;
-        state.writeEvidence(transcript, { ...base, status: "skipped", reason: result.reason });
-      } else {
-        summary.analyzed += 1;
-        summary.usage.push(result.usage);
-        state.writeEvidence(transcript, {
-          ...base,
-          status: "ok",
-          stats: result.distilled.stats,
-          ...result.evidence,
-        });
-        evidenceTotals.positive += result.evidence.positive.length;
-        evidenceTotals.negative += result.evidence.negative.length;
-        evidenceTotals.gaps += result.evidence.gaps.length;
-        summary.quotesNotInTrace += result.evidence.quotesNotInTrace;
-        emitProgress("analyze:evidence", { ...evidenceTotals });
-      }
+      recordAnalysisResult({ state, summary, evidenceTotals, transcript, base, result });
     } catch (err) {
       if (err instanceof UserError) throw err;
       // Per-transcript fail-soft: recorded, listed by `backpass status`, retried next run.
@@ -430,16 +480,7 @@ export async function analyzeTranscripts({
       state.writeEvidence(transcript, { ...base, status: "failed", error: err.message });
     } finally {
       done += 1;
-      emitProgress("analyze:tick", {
-        slot,
-        done,
-        ok: summary.analyzed,
-        skipped: summary.skipped,
-        failed: summary.failed,
-      });
-      if (done % 10 === 0 || done === pending.length) {
-        info(color.dim(`  ${done}/${pending.length} analyzed`));
-      }
+      reportTick(summary, slot, done, pending.length);
     }
   });
 

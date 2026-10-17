@@ -474,6 +474,87 @@ export async function execOneShot({
   }
 }
 
+/** Create the named session, disposing the invocation on every failure. */
+async function createAcpxSession({ invocation, agent, acpxAgentArgs, sessionName, cwd, runOpts, createTimeoutMs }) {
+  /** @type {Awaited<ReturnType<typeof run>>} */
+  let created;
+  try {
+    await verifyHarnessInvocation(invocation, cwd);
+    created = await run(
+      [
+        ...(invocation.acpxModel ? ["--model", invocation.acpxModel] : []),
+        ...acpxAgentArgs,
+        "sessions",
+        "new",
+        "--name",
+        sessionName,
+      ],
+      { ...runOpts, timeoutMs: createTimeoutMs },
+    );
+  } catch (err) {
+    invocation.dispose();
+    throw err;
+  }
+  if (created.spawnError && created.spawnError.code === "ENOENT") {
+    invocation.dispose();
+    throw notFoundError(created);
+  }
+  if (created.timedOut) {
+    invocation.dispose();
+    throw sessionCreateTimeoutError({ agent, acpxAgentArgs, timeoutMs: createTimeoutMs });
+  }
+  if (created.code !== 0) {
+    invocation.dispose();
+    // An auth or spawn failure must surface as such so the caller can fall through.
+    if (classifyAcpxFailure(created)) {
+      throw new AcpxError(`acpx ${agent} session create failed: ${firstLine(created.stderr)}`, created);
+    }
+    const detail = firstLine(created.stderr) || `exit ${created.code}`;
+    const err = new AcpxError(`acpx ${agent} has no session support: ${detail}`, created);
+    err.unsupported = true;
+    throw err;
+  }
+}
+
+/** Apply the invocation's session mode and effort overlays to a freshly created session. */
+async function applySessionOverlays({ invocation, agent, acpxAgentArgs, sessionName, effort, runOpts, notes }) {
+  if (invocation.sessionMode) {
+    await applySessionMode({ invocation, agent, acpxAgentArgs, sessionName, runOpts, notes });
+  }
+  if (effort && invocation.setEffortKey) {
+    await applySessionEffort({ invocation, agent, acpxAgentArgs, sessionName, effort, runOpts });
+  }
+}
+
+async function applySessionMode({ invocation, agent, acpxAgentArgs, sessionName, runOpts, notes }) {
+  const setMode = await run([...acpxAgentArgs, "-s", sessionName, "set-mode", invocation.sessionMode], runOpts);
+  if (setMode.code !== 0) {
+    // Same degradation as session create: backpass kills the call, acpx exits 130 with
+    // no stderr, and `exit 130` would read as the harness rejecting the mode.
+    const detail = setMode.timedOut ? "timed out" : firstLine(setMode.stderr) || `exit ${setMode.code}`;
+    if (invocation.sessionModeRequired) {
+      throw new AcpxError(
+        `acpx ${agent} could not enable write session mode=${invocation.sessionMode}: ${detail}`,
+        setMode,
+      );
+    }
+    notes.push(`${agent} did not accept session mode ${invocation.sessionMode}; continuing with the adapter default`);
+  }
+}
+
+async function applySessionEffort({ invocation, agent, acpxAgentArgs, sessionName, effort, runOpts }) {
+  const setArgs = invocation.acpxAgentCommand
+    ? [...acpxAgentArgs, "set", invocation.setEffortKey, effort, "-s", sessionName]
+    : [...acpxAgentArgs, "-s", sessionName, "set", invocation.setEffortKey, effort];
+  const set = await run(setArgs, runOpts);
+  if (set.code !== 0) {
+    // Same degradation as session create: a killed call exits 130 with no stderr, and
+    // `exit 130` would read as the adapter refusing the effort key.
+    const detail = set.timedOut ? "timed out" : firstLine(set.stderr) || `exit ${set.code}`;
+    throw new AcpxError(`acpx ${agent} could not apply invocation-scoped effort=${effort}: ${detail}`, set);
+  }
+}
+
 /**
  * A named session that stays open across turns (design section 5).
  *
@@ -519,44 +600,7 @@ export async function openSession({
   // The adapter is already up once the session exists, so the later `set` calls do not
   // need the cold-start budget `sessions new` gets.
   const runOpts = { timeoutMs: 60_000, cwd, env: invocation.env };
-  /** @type {Awaited<ReturnType<typeof run>>} */
-  let created;
-  try {
-    await verifyHarnessInvocation(invocation, cwd);
-    created = await run(
-      [
-        ...(invocation.acpxModel ? ["--model", invocation.acpxModel] : []),
-        ...acpxAgentArgs,
-        "sessions",
-        "new",
-        "--name",
-        sessionName,
-      ],
-      { ...runOpts, timeoutMs: createTimeoutMs },
-    );
-  } catch (err) {
-    invocation.dispose();
-    throw err;
-  }
-  if (created.spawnError && created.spawnError.code === "ENOENT") {
-    invocation.dispose();
-    throw notFoundError(created);
-  }
-  if (created.timedOut) {
-    invocation.dispose();
-    throw sessionCreateTimeoutError({ agent, acpxAgentArgs, timeoutMs: createTimeoutMs });
-  }
-  if (created.code !== 0) {
-    invocation.dispose();
-    // An auth or spawn failure must surface as such so the caller can fall through.
-    if (classifyAcpxFailure(created)) {
-      throw new AcpxError(`acpx ${agent} session create failed: ${firstLine(created.stderr)}`, created);
-    }
-    const detail = firstLine(created.stderr) || `exit ${created.code}`;
-    const err = new AcpxError(`acpx ${agent} has no session support: ${detail}`, created);
-    err.unsupported = true;
-    throw err;
-  }
+  await createAcpxSession({ invocation, agent, acpxAgentArgs, sessionName, cwd, runOpts, createTimeoutMs });
 
   const startedAt = Date.now();
   let closed = false;
@@ -579,35 +623,7 @@ export async function openSession({
   };
 
   try {
-    if (invocation.sessionMode) {
-      const setMode = await run([...acpxAgentArgs, "-s", sessionName, "set-mode", invocation.sessionMode], runOpts);
-      if (setMode.code !== 0) {
-        // Same degradation as session create: backpass kills the call, acpx exits 130 with
-        // no stderr, and `exit 130` would read as the harness rejecting the mode.
-        const detail = setMode.timedOut ? "timed out" : firstLine(setMode.stderr) || `exit ${setMode.code}`;
-        if (invocation.sessionModeRequired) {
-          throw new AcpxError(
-            `acpx ${agent} could not enable write session mode=${invocation.sessionMode}: ${detail}`,
-            setMode,
-          );
-        }
-        notes.push(
-          `${agent} did not accept session mode ${invocation.sessionMode}; continuing with the adapter default`,
-        );
-      }
-    }
-    if (effort && invocation.setEffortKey) {
-      const setArgs = invocation.acpxAgentCommand
-        ? [...acpxAgentArgs, "set", invocation.setEffortKey, effort, "-s", sessionName]
-        : [...acpxAgentArgs, "-s", sessionName, "set", invocation.setEffortKey, effort];
-      const set = await run(setArgs, runOpts);
-      if (set.code !== 0) {
-        // Same degradation as session create: a killed call exits 130 with no stderr, and
-        // `exit 130` would read as the adapter refusing the effort key.
-        const detail = set.timedOut ? "timed out" : firstLine(set.stderr) || `exit ${set.code}`;
-        throw new AcpxError(`acpx ${agent} could not apply invocation-scoped effort=${effort}: ${detail}`, set);
-      }
-    }
+    await applySessionOverlays({ invocation, agent, acpxAgentArgs, sessionName, effort, runOpts, notes });
   } catch (err) {
     await close();
     throw err;
@@ -639,25 +655,35 @@ export async function openSession({
       promptFile,
     ];
     const result = await run(args, { timeoutMs: (timeoutSeconds + 30) * 1000, cwd, env: invocation.env });
-    if (result.timedOut) throw new AcpxError(`acpx ${agent} session prompt timed out after ${timeoutSeconds}s`, result);
-    if (result.code !== 0) {
-      const detail = firstLine(result.stderr) || `exit ${result.code}`;
-      throw new AcpxError(`acpx ${agent} session prompt failed (exit ${result.code}): ${detail}`, result);
-    }
+    assertSessionPromptOk({ agent, result, timeoutSeconds });
 
     const combined = `${result.stdout}\n${result.stderr}`;
     /** @type {Record<string, number> | null} */
     let usage = parseTokenLine(combined);
     if (!usage) {
-      // The harness store holds the whole session's usage; this turn is the increase.
-      const cumulative = recoverUsageFromStore({ agent, promptFile: firstPromptFile, cwd, startedAt });
-      usage = cumulative ? subtractUsage(cumulative, storeUsageSeen) : null;
-      if (cumulative) storeUsageSeen = cumulative;
+      const recovered = recoverTurnUsage({ agent, promptFile: firstPromptFile, cwd, startedAt, seen: storeUsageSeen });
+      usage = recovered.usage;
+      storeUsageSeen = recovered.seen;
     }
     return { text: stripAcpxNoise(result.stdout), usage, raw: result.stdout, stderr: result.stderr, notes };
   };
 
   return { notes, prompt, close };
+}
+
+/** The harness store holds the whole session's usage; this turn is the increase. */
+function recoverTurnUsage({ agent, promptFile, cwd, startedAt, seen }) {
+  const cumulative = recoverUsageFromStore({ agent, promptFile, cwd, startedAt });
+  if (!cumulative) return { usage: null, seen };
+  return { usage: subtractUsage(cumulative, seen), seen: cumulative };
+}
+
+function assertSessionPromptOk({ agent, result, timeoutSeconds }) {
+  if (result.timedOut) throw new AcpxError(`acpx ${agent} session prompt timed out after ${timeoutSeconds}s`, result);
+  if (result.code !== 0) {
+    const detail = firstLine(result.stderr) || `exit ${result.code}`;
+    throw new AcpxError(`acpx ${agent} session prompt failed (exit ${result.code}): ${detail}`, result);
+  }
 }
 
 /** @returns {Record<string, number>} */
@@ -796,19 +822,22 @@ function recoverPiUsage({ promptFile, cwd, startedAt }) {
     const entries = readJsonl(candidate.path);
     const firstUser = entries.find((e) => e.type === "message" && e.message?.role === "user");
     if (!firstUser || piMessageText(firstUser.message.content).trim() !== prompt) continue;
-
-    const usage = {};
-    for (const entry of entries) {
-      if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
-      const turn = entry.message.usage;
-      if (!turn || typeof turn !== "object") continue;
-      for (const [piKey, key] of Object.entries(PI_USAGE_KEYS)) {
-        if (Number.isFinite(turn[piKey])) usage[key] = (usage[key] || 0) + turn[piKey];
-      }
-    }
-    return Object.keys(usage).length ? usage : null;
+    return sumPiAssistantUsage(entries);
   }
   return null;
+}
+
+function sumPiAssistantUsage(entries) {
+  const usage = {};
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+    const turn = entry.message.usage;
+    if (!turn || typeof turn !== "object") continue;
+    for (const [piKey, key] of Object.entries(PI_USAGE_KEYS)) {
+      if (Number.isFinite(turn[piKey])) usage[key] = (usage[key] || 0) + turn[piKey];
+    }
+  }
+  return Object.keys(usage).length ? usage : null;
 }
 
 function piBlockText(block) {

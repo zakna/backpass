@@ -151,39 +151,49 @@ function normalizeEvents(events) {
   /** @type {TranscriptRecord[]} */
   const records = [];
   let turn = 0;
-  let index = 0;
 
   for (const event of Array.isArray(events) ? events : []) {
     if (event?.kind === "message") {
-      const text = String(redact(String(event.text ?? ""))).trim();
-      if (!text) continue;
+      const record = messageRecord(event, records.length, turn + 1);
+      if (!record) continue;
       turn += 1;
-      records.push({
-        index: index++,
-        turn,
-        kind: "message",
-        role: event.role === "user" ? "user" : "assistant",
-        text,
-      });
-      continue;
+      records.push(record);
+    } else if (event?.kind === "tool") {
+      const record = toolRecord(event, records.length, turn);
+      if (record) records.push(record);
     }
-
-    if (event?.kind !== "tool") continue;
-    const input = String(redact(stringify(event.input)));
-    const result = String(redact(stringify(event.result)));
-    const text = [input ? `input: ${input}` : "", result ? `result: ${result}` : ""].filter(Boolean).join("\n");
-    if (!text && !event.name) continue;
-    records.push({
-      index: index++,
-      turn,
-      kind: "tool",
-      role: "tool",
-      name: String(event.name || "unknown"),
-      text,
-    });
   }
 
   return records;
+}
+
+/** @returns {TranscriptRecord | null} */
+function messageRecord(event, index, turn) {
+  const text = String(redact(String(event.text ?? ""))).trim();
+  if (!text) return null;
+  return {
+    index,
+    turn,
+    kind: "message",
+    role: event.role === "user" ? "user" : "assistant",
+    text,
+  };
+}
+
+/** @returns {TranscriptRecord | null} */
+function toolRecord(event, index, turn) {
+  const input = String(redact(stringify(event.input)));
+  const result = String(redact(stringify(event.result)));
+  const text = [input ? `input: ${input}` : "", result ? `result: ${result}` : ""].filter(Boolean).join("\n");
+  if (!text && !event.name) return null;
+  return {
+    index,
+    turn,
+    kind: "tool",
+    role: "tool",
+    name: String(event.name || "unknown"),
+    text,
+  };
 }
 
 /** @param {unknown} value */

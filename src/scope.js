@@ -226,17 +226,11 @@ function resolveProjectScope(repo, config) {
   };
 }
 
-function resolveUserScope(cwd, config, { strict = false, home = os.homedir(), associateUserFn = associateUser } = {}) {
-  const root = home;
-  const memoryFiles = (config.memoryFiles || []).map((file) => pathInRoot(file, root, home));
-  const overflowDir = pathInRoot(config.skillsDir || ".agents/skills", root, home);
-  const skillDirs = (config.skillsDirs || []).map((dir) => pathInRoot(dir, root, home));
-  const repo = syntheticUserRepo(root);
-  const stateDir = userStateDir();
+/** Memoised association that indexes the worktrees of every tier-1 project it sees. */
+function makeUserAssociator({ associateUserFn, strict, knownWorktrees }) {
   const associationCache = new Map();
-  const knownWorktrees = new Map();
   const indexedRoots = new Set();
-  const associate = (descriptor) => {
+  return (descriptor) => {
     const key = JSON.stringify([descriptor?.cwd || null, descriptor?.remotes || []]);
     if (!associationCache.has(key)) {
       const association = associateUserFn(descriptor, { strict });
@@ -250,19 +244,35 @@ function resolveUserScope(cwd, config, { strict = false, home = os.homedir(), as
     }
     return associationCache.get(key);
   };
+}
+
+/** Re-home a tier-3 transcript whose cwd sits inside a worktree learned from a tier-1 project. */
+function adoptKnownWorktree(transcript, knownWorktrees) {
+  const cwdPath = realpathOrResolve(transcript.cwd);
+  const match = [...knownWorktrees.entries()]
+    .filter(([worktree]) => cwdPath === worktree || cwdPath.startsWith(`${worktree}${path.sep}`))
+    .sort(([a], [b]) => b.length - a.length)[0];
+  if (!match) return;
+  const [worktree, project] = match;
+  transcript.project = project;
+  transcript.association.project = project;
+  transcript.association.confidence = "git";
+  transcript.association.reason = `cwd is in registered worktree ${worktree}`;
+}
+
+function resolveUserScope(cwd, config, { strict = false, home = os.homedir(), associateUserFn = associateUser } = {}) {
+  const root = home;
+  const memoryFiles = (config.memoryFiles || []).map((file) => pathInRoot(file, root, home));
+  const overflowDir = pathInRoot(config.skillsDir || ".agents/skills", root, home);
+  const skillDirs = (config.skillsDirs || []).map((dir) => pathInRoot(dir, root, home));
+  const repo = syntheticUserRepo(root);
+  const stateDir = userStateDir();
+  const knownWorktrees = new Map();
+  const associate = makeUserAssociator({ associateUserFn, strict, knownWorktrees });
   const normalizeProjects = (transcripts) => {
     for (const transcript of transcripts) {
       if (transcript.host || transcript.association?.tier !== 3 || !transcript.cwd) continue;
-      const cwdPath = realpathOrResolve(transcript.cwd);
-      const match = [...knownWorktrees.entries()]
-        .filter(([worktree]) => cwdPath === worktree || cwdPath.startsWith(`${worktree}${path.sep}`))
-        .sort(([a], [b]) => b.length - a.length)[0];
-      if (!match) continue;
-      const [worktree, project] = match;
-      transcript.project = project;
-      transcript.association.project = project;
-      transcript.association.confidence = "git";
-      transcript.association.reason = `cwd is in registered worktree ${worktree}`;
+      adoptKnownWorktree(transcript, knownWorktrees);
     }
     return transcripts;
   };

@@ -62,6 +62,26 @@ export function probeCommand(nodePath) {
   return `'${nodePath}' -`;
 }
 
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** @returns {Record<string, string>} */
+function normalizeHostEnv(rawEnv) {
+  /** @type {Record<string, string>} */
+  const env = {};
+  for (const [key, value] of Object.entries(rawEnv || {})) {
+    if (!REMOTE_ENV_ALLOWLIST.includes(key)) {
+      throw new UserError(
+        `discovery.hosts[].env may only set store locations (${REMOTE_ENV_ALLOWLIST.join(", ")}); got "${key}"`,
+      );
+    }
+    if (typeof value !== "string") throw new UserError(`discovery.hosts[].env.${key} must be a string`);
+    env[key] = value;
+  }
+  return env;
+}
+
 /**
  * @param {string | object} entry
  * @returns {{ host: string, node: string | null, env: Record<string, string>,
@@ -75,24 +95,12 @@ export function normalizeHostEntry(entry) {
         `(got ${JSON.stringify(entry)})`,
     );
   }
-  /** @type {Record<string, string>} */
-  const env = {};
-  for (const [key, value] of Object.entries(raw.env || {})) {
-    if (!REMOTE_ENV_ALLOWLIST.includes(key)) {
-      throw new UserError(
-        `discovery.hosts[].env may only set store locations (${REMOTE_ENV_ALLOWLIST.join(", ")}); got "${key}"`,
-      );
-    }
-    if (typeof value !== "string") throw new UserError(`discovery.hosts[].env.${key} must be a string`);
-    env[key] = value;
-  }
+  const env = normalizeHostEnv(raw.env);
   if (raw.node !== undefined && raw.node !== null && (typeof raw.node !== "string" || !raw.node.startsWith("/"))) {
     throw new UserError("discovery.hosts[].node must be an absolute POSIX path string");
   }
-  if (raw.harnesses !== undefined && raw.harnesses !== null) {
-    if (!Array.isArray(raw.harnesses) || raw.harnesses.some((h) => typeof h !== "string")) {
-      throw new UserError("discovery.hosts[].harnesses must be an array of harness names");
-    }
+  if (raw.harnesses !== undefined && raw.harnesses !== null && !isStringArray(raw.harnesses)) {
+    throw new UserError("discovery.hosts[].harnesses must be an array of harness names");
   }
   const connectTimeoutSeconds = raw.connectTimeoutSeconds ?? DEFAULT_CONNECT_TIMEOUT_SECONDS;
   if (!Number.isInteger(connectTimeoutSeconds) || connectTimeoutSeconds <= 0) {
@@ -131,21 +139,15 @@ export function resolveHostList(config) {
 /** @returns {{ nodes: {path: string, version: string, parsed: number[]}[], git: string|null, uname: string|null, home: string|null }} */
 export function parseLocateOutput(stdout) {
   const nodes = [];
-  let git = null;
-  let uname = null;
-  let home = null;
+  const scalars = { git: null, uname: null, home: null };
   for (const line of String(stdout || "").split("\n")) {
     const [kind, ...rest] = line.trim().split("|");
     if (kind === "node") {
       const [nodePath, version] = rest;
       const parsed = parseNodeVersion(version);
       if (nodePath && parsed) nodes.push({ path: nodePath, version, parsed });
-    } else if (kind === "git" && rest[0]) {
-      git = rest[0];
-    } else if (kind === "uname" && rest[0]) {
-      uname = rest[0];
-    } else if (kind === "home" && rest[0]) {
-      home = rest[0];
+    } else if (rest[0] && Object.hasOwn(scalars, kind)) {
+      scalars[kind] = rest[0];
     }
   }
   const unique = [];
@@ -153,7 +155,7 @@ export function parseLocateOutput(stdout) {
     if (!unique.some((other) => other.path === node.path)) unique.push(node);
   }
   unique.sort((a, b) => compareNodeVersions(b.parsed, a.parsed));
-  return { nodes: unique, git, uname, home };
+  return { nodes: unique, ...scalars };
 }
 
 /** Newest Node at or above 22.5 if there is one, else the newest there is. */
@@ -228,23 +230,7 @@ export async function collectHosts({ hosts, harnesses, cutoffMs, controlPath }) 
     if (!liveProgress) info(`ssh ${entry.host} connecting`);
 
     try {
-      const masterCall = await startSshMaster({
-        destination: entry.host,
-        connectTimeoutSeconds: entry.connectTimeoutSeconds,
-        timeoutMs: LOCATE_TIMEOUT_MS,
-        controlPath,
-      });
-      const masterFailure = classifySshFailure(masterCall, {
-        destination: entry.host,
-        connectTimeoutSeconds: entry.connectTimeoutSeconds,
-        timeoutMs: LOCATE_TIMEOUT_MS,
-      });
-      if (masterFailure) {
-        result.error = `failed to start ssh control master: ${masterFailure.message}`;
-      } else {
-        result.master = masterCall.master;
-        await collectOneHost(entry, { harnesses, cutoffMs }, result);
-      }
+      await openMasterAndCollect(entry, { harnesses, cutoffMs, controlPath }, result);
     } catch (err) {
       if (err instanceof UserError) {
         await closeSshMasters(results.map((hostResult) => hostResult.master).filter(Boolean));
@@ -254,21 +240,151 @@ export async function collectHosts({ hosts, harnesses, cutoffMs, controlPath }) 
     }
 
     if (result.error && result.master) await closeSshMaster(result.master);
-    if (result.error) warn(`${entry.host}: ${result.error} - host skipped, run continues`);
-    for (const note of result.warnings) warn(`${entry.host}: ${note}`);
-    emitProgress("discover:host:done", {
-      host: entry.host,
-      node: result.nodeVersion,
-      error: result.error,
-      harnesses: result.harnesses,
-      scanned: result.scanned,
-    });
-    if (!liveProgress && !result.error) {
-      const nodeNote = result.nodeVersion ? `node ${result.nodeVersion} · ` : "";
-      info(`ssh ${entry.host} done · ${nodeNote}${result.scanned} scanned`);
-    }
+    reportHostDone(entry, result, liveProgress);
   }
   return results;
+}
+
+async function openMasterAndCollect(entry, { harnesses, cutoffMs, controlPath }, result) {
+  const masterCall = await startSshMaster({
+    destination: entry.host,
+    connectTimeoutSeconds: entry.connectTimeoutSeconds,
+    timeoutMs: LOCATE_TIMEOUT_MS,
+    controlPath,
+  });
+  const masterFailure = classifySshFailure(masterCall, {
+    destination: entry.host,
+    connectTimeoutSeconds: entry.connectTimeoutSeconds,
+    timeoutMs: LOCATE_TIMEOUT_MS,
+  });
+  if (masterFailure) {
+    result.error = `failed to start ssh control master: ${masterFailure.message}`;
+    return;
+  }
+  result.master = masterCall.master;
+  await collectOneHost(entry, { harnesses, cutoffMs }, result);
+}
+
+function reportHostDone(entry, result, liveProgress) {
+  if (result.error) warn(`${entry.host}: ${result.error} - host skipped, run continues`);
+  for (const note of result.warnings) warn(`${entry.host}: ${note}`);
+  emitProgress("discover:host:done", {
+    host: entry.host,
+    node: result.nodeVersion,
+    error: result.error,
+    harnesses: result.harnesses,
+    scanned: result.scanned,
+  });
+  if (!liveProgress && !result.error) {
+    const nodeNote = result.nodeVersion ? `node ${result.nodeVersion} · ` : "";
+    info(`ssh ${entry.host} done · ${nodeNote}${result.scanned} scanned`);
+  }
+}
+
+function selectHarnesses(entry, harnesses, node, parsed, result) {
+  let selected = entry.harnesses ? harnesses.filter((h) => entry.harnesses.includes(h)) : [...harnesses];
+  if (node.version && !supportsNodeSqlite(node.version)) {
+    const dropped = selected.filter((h) => SQLITE_HARNESSES.has(h));
+    selected = selected.filter((h) => !SQLITE_HARNESSES.has(h));
+    if (dropped.length) result.warnings.push(`${dropped.join(", ")} skipped: node ${node.version} lacks node:sqlite`);
+  }
+  if (!parsed.git) {
+    result.warnings.push("live-path association unavailable (no git on the non-interactive PATH); tiers 2 and 3 only");
+  }
+  return selected;
+}
+
+/** The probe's last stdout line as a plain object, or null when it is anything else. */
+function parseProbeResponse(stdout) {
+  let response;
+  try {
+    response = JSON.parse(stdout.trim().split("\n").pop() || "");
+  } catch {
+    return null;
+  }
+  return isRecord(response) ? response : null;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+const isString = (value) => typeof value === "string";
+const isNullOrString = (value) => value === null || typeof value === "string";
+
+function isValidDescriptor(descriptor) {
+  return (
+    Boolean(descriptor) &&
+    typeof descriptor === "object" &&
+    isString(descriptor.harness) &&
+    isString(descriptor.id) &&
+    isString(descriptor.path) &&
+    isString(descriptor.key) &&
+    isNullOrString(descriptor.cwd) &&
+    isNullOrString(descriptor.gitRoot) &&
+    Array.isArray(descriptor.remotes) &&
+    descriptor.remotes.every(isString) &&
+    isNullOrString(descriptor.title) &&
+    isNullOrString(descriptor.model) &&
+    (descriptor.startedAt === null || Number.isFinite(descriptor.startedAt)) &&
+    Number.isFinite(descriptor.mtimeMs) &&
+    Number.isFinite(descriptor.bytes) &&
+    isNullOrString(descriptor.contentSignature) &&
+    isRecord(descriptor.extra) &&
+    isRecord(descriptor.interactionSignals) &&
+    (descriptor.kind === "raw" || descriptor.kind === "events")
+  );
+}
+
+function isValidHarnessStats(stats) {
+  return (
+    isRecord(stats) &&
+    Number.isFinite(stats.scanned) &&
+    Number.isFinite(stats.classified) &&
+    Number.isFinite(stats.self) &&
+    isNullOrString(stats.error)
+  );
+}
+
+function isValidPathFacts(facts) {
+  return (
+    isRecord(facts) &&
+    isString(facts.real) &&
+    typeof facts.exists === "boolean" &&
+    isNullOrString(facts.toplevel) &&
+    Array.isArray(facts.remotes) &&
+    facts.remotes.every(isString)
+  );
+}
+
+/** Whether every field the collector reads from a probe response has the shape it expects. */
+function isValidProbeResponse(response) {
+  const validScalars =
+    isString(response.node) &&
+    isString(response.platform) &&
+    isString(response.hostname) &&
+    isString(response.home) &&
+    response.home.length > 0;
+  if (!isRecord(response.harnesses) || !isRecord(response.paths) || !validScalars) return false;
+  const validDescriptors = Array.isArray(response.transcripts) && response.transcripts.every(isValidDescriptor);
+  return (
+    validDescriptors &&
+    Object.values(response.harnesses).every(isValidHarnessStats) &&
+    Object.values(response.paths).every(isValidPathFacts) &&
+    response.transcripts.every((descriptor) =>
+      [descriptor.cwd, descriptor.gitRoot]
+        .filter((candidate) => candidate !== null)
+        .every((candidate) => candidate.length > 0 && Object.hasOwn(response.paths, candidate)),
+    ) &&
+    Array.isArray(response.warnings) &&
+    response.warnings.every(isString)
+  );
+}
+
+function unsupportedPlatformMessage(uname) {
+  return uname
+    ? `Windows and other non-POSIX remotes are not supported (uname said "${uname}")`
+    : "could not identify the remote platform (uname produced nothing)";
 }
 
 async function collectOneHost(entry, { harnesses, cutoffMs }, result) {
@@ -280,9 +396,7 @@ async function collectOneHost(entry, { harnesses, cutoffMs }, result) {
 
   const platform = platformFromUname(located.parsed.uname);
   if (!platform || !SUPPORTED_PLATFORMS.has(platform)) {
-    result.error = located.parsed.uname
-      ? `Windows and other non-POSIX remotes are not supported (uname said "${located.parsed.uname}")`
-      : "could not identify the remote platform (uname produced nothing)";
+    result.error = unsupportedPlatformMessage(located.parsed.uname);
     return;
   }
   result.platform = platform;
@@ -297,15 +411,7 @@ async function collectOneHost(entry, { harnesses, cutoffMs }, result) {
   result.node = node.path;
   result.nodeVersion = node.version;
 
-  let selected = entry.harnesses ? harnesses.filter((h) => entry.harnesses.includes(h)) : [...harnesses];
-  if (node.version && !supportsNodeSqlite(node.version)) {
-    const dropped = selected.filter((h) => SQLITE_HARNESSES.has(h));
-    selected = selected.filter((h) => !SQLITE_HARNESSES.has(h));
-    if (dropped.length) result.warnings.push(`${dropped.join(", ")} skipped: node ${node.version} lacks node:sqlite`);
-  }
-  if (!located.parsed.git) {
-    result.warnings.push("live-path association unavailable (no git on the non-interactive PATH); tiers 2 and 3 only");
-  }
+  const selected = selectHarnesses(entry, harnesses, node, located.parsed, result);
 
   let command;
   try {
@@ -340,14 +446,8 @@ async function collectOneHost(entry, { harnesses, cutoffMs }, result) {
     return;
   }
 
-  let response;
-  try {
-    response = JSON.parse(call.stdout.trim().split("\n").pop() || "");
-  } catch {
-    result.error = "probe response unreadable";
-    return;
-  }
-  if (!response || typeof response !== "object" || Array.isArray(response)) {
+  const response = parseProbeResponse(call.stdout);
+  if (!response) {
     result.error = "probe response unreadable";
     return;
   }
@@ -355,90 +455,15 @@ async function collectOneHost(entry, { harnesses, cutoffMs }, result) {
     result.error = `probe spoke protocol ${response.protocol}, this backpass speaks ${PROTOCOL}`;
     return;
   }
-  const validDescriptors =
-    Array.isArray(response.transcripts) &&
-    response.transcripts.every(
-      (descriptor) =>
-        descriptor &&
-        typeof descriptor === "object" &&
-        typeof descriptor.harness === "string" &&
-        typeof descriptor.id === "string" &&
-        typeof descriptor.path === "string" &&
-        typeof descriptor.key === "string" &&
-        (descriptor.cwd === null || typeof descriptor.cwd === "string") &&
-        (descriptor.gitRoot === null || typeof descriptor.gitRoot === "string") &&
-        Array.isArray(descriptor.remotes) &&
-        descriptor.remotes.every((remote) => typeof remote === "string") &&
-        (descriptor.title === null || typeof descriptor.title === "string") &&
-        (descriptor.model === null || typeof descriptor.model === "string") &&
-        (descriptor.startedAt === null || Number.isFinite(descriptor.startedAt)) &&
-        Number.isFinite(descriptor.mtimeMs) &&
-        Number.isFinite(descriptor.bytes) &&
-        (descriptor.contentSignature === null || typeof descriptor.contentSignature === "string") &&
-        descriptor.extra &&
-        typeof descriptor.extra === "object" &&
-        !Array.isArray(descriptor.extra) &&
-        descriptor.interactionSignals &&
-        typeof descriptor.interactionSignals === "object" &&
-        !Array.isArray(descriptor.interactionSignals) &&
-        (descriptor.kind === "raw" || descriptor.kind === "events"),
-    );
-  const validRecords = [response.harnesses, response.paths].every(
-    (value) => value && typeof value === "object" && !Array.isArray(value),
-  );
-  const validScalars =
-    typeof response.node === "string" &&
-    typeof response.platform === "string" &&
-    typeof response.hostname === "string" &&
-    typeof response.home === "string" &&
-    response.home.length > 0;
-  const validHarnesses =
-    validRecords &&
-    Object.values(response.harnesses).every(
-      (stats) =>
-        stats &&
-        typeof stats === "object" &&
-        !Array.isArray(stats) &&
-        Number.isFinite(stats.scanned) &&
-        Number.isFinite(stats.classified) &&
-        Number.isFinite(stats.self) &&
-        (stats.error === null || typeof stats.error === "string"),
-    );
-  const validFacts =
-    validRecords &&
-    Object.values(response.paths).every(
-      (facts) =>
-        facts &&
-        typeof facts === "object" &&
-        !Array.isArray(facts) &&
-        typeof facts.real === "string" &&
-        typeof facts.exists === "boolean" &&
-        (facts.toplevel === null || typeof facts.toplevel === "string") &&
-        Array.isArray(facts.remotes) &&
-        facts.remotes.every((remote) => typeof remote === "string"),
-    );
-  const validDescriptorFacts =
-    validDescriptors &&
-    validFacts &&
-    response.transcripts.every((descriptor) =>
-      [descriptor.cwd, descriptor.gitRoot]
-        .filter((candidate) => candidate !== null)
-        .every((candidate) => candidate.length > 0 && Object.hasOwn(response.paths, candidate)),
-    );
-  if (
-    !validDescriptors ||
-    !validRecords ||
-    !validScalars ||
-    !validHarnesses ||
-    !validFacts ||
-    !validDescriptorFacts ||
-    !Array.isArray(response.warnings) ||
-    response.warnings.some((note) => typeof note !== "string")
-  ) {
+  if (!isValidProbeResponse(response)) {
     result.error = "probe response unreadable";
     return;
   }
 
+  applyProbeResponse(result, response);
+}
+
+function applyProbeResponse(result, response) {
   result.nodeVersion = response.node || result.nodeVersion;
   result.hostname = response.hostname || null;
   result.home = response.home || result.home;
@@ -508,8 +533,135 @@ export async function prefetchRemoteTranscripts(transcripts, { config }) {
   return stats;
 }
 
+const fetchIdentity = (harness, key) => JSON.stringify([harness, key]);
+
+/** What the cache records about one fetched transcript, preferring the frame's own facts. */
+function fetchedMetadata(host, transcript, frame) {
+  const { header, body } = frame;
+  const isRaw = header.kind === "raw";
+  return {
+    host,
+    harness: transcript.harness,
+    key: header.key,
+    kind: header.kind,
+    mtimeMs: isRaw && Number.isFinite(header.mtimeMs) ? header.mtimeMs : transcript.mtimeMs,
+    bytes: isRaw ? body.length : transcript.bytes,
+    contentSignature:
+      header.kind === "events" && typeof header.contentSignature === "string"
+        ? header.contentSignature
+        : transcript.contentSignature,
+    model: header.model || null,
+  };
+}
+
+/** Whether a torn header prefix could still belong to this pending transcript. */
+function partialHeaderMatches(transcript, partialHeader) {
+  const prefix = Buffer.from(
+    JSON.stringify({ key: transcript.remote.key, harness: transcript.harness }).slice(0, -1),
+    "utf8",
+  );
+  const common = Math.min(prefix.length, partialHeader.bytes.length);
+  return prefix.subarray(0, common).equals(partialHeader.bytes.subarray(0, common));
+}
+
+/** Commit one fetched transcript into the cache; returns false (recording why) when it cannot. */
+function commitFetched(transcript, outcome, { cache, index, stats }) {
+  try {
+    const written = cache.commit(index, outcome.staged, outcome.metadata);
+    transcript.mtimeMs = outcome.metadata.mtimeMs;
+    transcript.bytes = outcome.metadata.bytes;
+    transcript.contentSignature = outcome.metadata.contentSignature;
+    transcript.remote.cachePath = written.path;
+    stats.fetched += 1;
+    stats.bytes += written.bytes;
+    return true;
+  } catch (err) {
+    outcome.error = err.message;
+    return false;
+  }
+}
+
+/** Whether the stream tore inside a frame (or header) that belongs to an unresolved transcript. */
+function hasTornOutstanding(reader, pending, transcriptsByKey, outcomes) {
+  const incompleteIdentity = reader.incomplete
+    ? fetchIdentity(reader.incomplete.header.harness, reader.incomplete.header.key)
+    : null;
+  if (incompleteIdentity && transcriptsByKey.has(incompleteIdentity) && !outcomes.has(incompleteIdentity)) {
+    return true;
+  }
+  const partialHeader = reader.partialHeader;
+  if (!partialHeader) return false;
+  const partialMatches = pending.filter(
+    (transcript) =>
+      !outcomes.has(fetchIdentity(transcript.harness, transcript.remote.key)) &&
+      partialHeaderMatches(transcript, partialHeader),
+  );
+  return partialMatches.length === 1;
+}
+
+/** Record the outcome of one frame against the pending transcript it names. */
+function acceptFrame(frame, { host, cache, transcriptsByKey, outcomes }) {
+  const { harness, key } = frame.header;
+  const identity = fetchIdentity(harness, key);
+  const transcript = transcriptsByKey.get(identity);
+  if (!transcript || outcomes.has(identity)) return;
+  if (frame.header.kind === "error") {
+    outcomes.set(identity, { error: frame.header.error || "remote fetch failed" });
+    return;
+  }
+  try {
+    const metadata = fetchedMetadata(host, transcript, frame);
+    const staged = cache.stage(host, transcript.harness, key, frame.body);
+    outcomes.set(identity, { staged, metadata });
+  } catch (err) {
+    outcomes.set(identity, { error: err.message });
+  }
+}
+
+/** Run the fetch over ssh, streaming frames into `onStdout`; a transport throw becomes a failed call. */
+async function runFetchCall(host, first, items, onStdout) {
+  try {
+    return await runSsh({
+      destination: host,
+      command: probeCommand(first.node),
+      input: buildProbeProgram({ protocol: PROTOCOL, op: "fetch", items }, { env: first.env || {} }),
+      timeoutMs: FETCH_TIMEOUT_MS,
+      connectTimeoutSeconds: first.connectTimeoutSeconds,
+      controlPath: first.master.controlPath,
+      captureStdout: false,
+      onStdout,
+    });
+  } catch (err) {
+    if (err instanceof UserError) throw err;
+    return { code: null, stdout: "", stderr: err.message };
+  }
+}
+
+/** Commit a transcript whose frame arrived whole, or mark it failed with the most specific reason. */
+function settleTranscript(transcript, { host, outcomes, commitAllowed, streamError }, ctx) {
+  const outcome = outcomes.get(fetchIdentity(transcript.harness, transcript.remote.key));
+  if (outcome?.staged && commitAllowed && commitFetched(transcript, outcome, ctx)) return;
+  if (outcome?.staged) ctx.cache.discard(outcome.staged);
+  const reason = outcome?.error || streamError || "remote fetch incomplete";
+  transcript.remoteError = `${host}: ${reason}`;
+  ctx.stats.failed += 1;
+}
+
+function warnEndedEarly(host) {
+  warn(`${host}: the fetch stream ended early; the missing transcripts are retried next run`);
+}
+
+/** Feed one stdout chunk to the reader; an unreadable stream is remembered, not thrown. */
+function feedFrames(chunk, reader, frameContext, stream) {
+  if (stream.parseError) return;
+  try {
+    for (const frame of reader.push(chunk)) acceptFrame(frame, frameContext);
+  } catch (err) {
+    stream.parseError = err.message;
+  }
+}
+
 async function fetchHost(host, pending, { cache, index, stats }) {
-  const first = pending[0].remote;
   const items = pending.map((transcript) => ({
     harness: transcript.harness,
     key: transcript.remote.key,
@@ -520,116 +672,26 @@ async function fetchHost(host, pending, { cache, index, stats }) {
     mtimeMs: transcript.mtimeMs,
   }));
   const reader = createFrameReader();
-  const fetchIdentity = (harness, key) => JSON.stringify([harness, key]);
   const transcriptsByKey = new Map(
     pending.map((transcript) => [fetchIdentity(transcript.harness, transcript.remote.key), transcript]),
   );
   const outcomes = new Map();
-  let parseError = null;
+  const frameContext = { host, cache, transcriptsByKey, outcomes };
+  const stream = { parseError: null };
 
-  function acceptFrame(frame) {
-    const { harness, key } = frame.header;
-    const identity = fetchIdentity(harness, key);
-    const transcript = transcriptsByKey.get(identity);
-    if (!transcript || outcomes.has(identity)) return;
-    if (frame.header.kind === "error") {
-      outcomes.set(identity, { error: frame.header.error || "remote fetch failed" });
-      return;
-    }
-    try {
-      const metadata = {
-        host,
-        harness: transcript.harness,
-        key,
-        kind: frame.header.kind,
-        mtimeMs:
-          frame.header.kind === "raw" && Number.isFinite(frame.header.mtimeMs)
-            ? frame.header.mtimeMs
-            : transcript.mtimeMs,
-        bytes: frame.header.kind === "raw" ? frame.body.length : transcript.bytes,
-        contentSignature:
-          frame.header.kind === "events" && typeof frame.header.contentSignature === "string"
-            ? frame.header.contentSignature
-            : transcript.contentSignature,
-        model: frame.header.model || null,
-      };
-      const staged = cache.stage(host, transcript.harness, key, frame.body);
-      outcomes.set(identity, { staged, metadata });
-    } catch (err) {
-      outcomes.set(identity, { error: err.message });
-    }
-  }
-
-  let call;
-  try {
-    call = await runSsh({
-      destination: host,
-      command: probeCommand(first.node),
-      input: buildProbeProgram({ protocol: PROTOCOL, op: "fetch", items }, { env: first.env || {} }),
-      timeoutMs: FETCH_TIMEOUT_MS,
-      connectTimeoutSeconds: first.connectTimeoutSeconds,
-      controlPath: first.master.controlPath,
-      captureStdout: false,
-      onStdout(chunk) {
-        if (parseError) return;
-        try {
-          for (const frame of reader.push(chunk)) acceptFrame(frame);
-        } catch (err) {
-          parseError = err.message;
-        }
-      },
-    });
-  } catch (err) {
-    if (err instanceof UserError) throw err;
-    call = { code: null, stdout: "", stderr: err.message };
-  }
-
+  const call = await runFetchCall(host, pending[0].remote, items, (chunk) =>
+    feedFrames(chunk, reader, frameContext, stream),
+  );
+  const { parseError } = stream;
   const failure = classifySshFailure(call, { destination: host, timeoutMs: FETCH_TIMEOUT_MS });
   const transportError = failure?.message || parseError;
-  const incompleteIdentity = reader.incomplete
-    ? fetchIdentity(reader.incomplete.header.harness, reader.incomplete.header.key)
-    : null;
-  const partialHeader = reader.partialHeader;
-  const partialMatches = partialHeader
-    ? pending.filter((transcript) => {
-        const identity = fetchIdentity(transcript.harness, transcript.remote.key);
-        if (outcomes.has(identity)) return false;
-        const prefix = Buffer.from(
-          JSON.stringify({ key: transcript.remote.key, harness: transcript.harness }).slice(0, -1),
-          "utf8",
-        );
-        const common = Math.min(prefix.length, partialHeader.bytes.length);
-        return prefix.subarray(0, common).equals(partialHeader.bytes.subarray(0, common));
-      })
-    : [];
-  const tornOutstanding =
-    (incompleteIdentity && transcriptsByKey.has(incompleteIdentity) && !outcomes.has(incompleteIdentity)) ||
-    partialMatches.length === 1;
-  const streamError = transportError || (!reader.ended ? "remote fetch incomplete" : null);
-  for (const transcript of pending) {
-    const identity = fetchIdentity(transcript.harness, transcript.remote.key);
-    const outcome = outcomes.get(identity);
-    const independentlyComplete = reader.ended || Boolean(tornOutstanding);
-    if (outcome?.staged && !transportError && independentlyComplete) {
-      try {
-        const written = cache.commit(index, outcome.staged, outcome.metadata);
-        transcript.mtimeMs = outcome.metadata.mtimeMs;
-        transcript.bytes = outcome.metadata.bytes;
-        transcript.contentSignature = outcome.metadata.contentSignature;
-        transcript.remote.cachePath = written.path;
-        stats.fetched += 1;
-        stats.bytes += written.bytes;
-        continue;
-      } catch (err) {
-        outcome.error = err.message;
-      }
-    }
-    if (outcome?.staged) cache.discard(outcome.staged);
-    const reason = outcome?.error || streamError || "remote fetch incomplete";
-    transcript.remoteError = `${host}: ${reason}`;
-    stats.failed += 1;
-  }
-  if (!reader.ended && !failure && !parseError) {
-    warn(`${host}: the fetch stream ended early; the missing transcripts are retried next run`);
-  }
+  const tornOutstanding = hasTornOutstanding(reader, pending, transcriptsByKey, outcomes);
+  const settled = {
+    host,
+    outcomes,
+    commitAllowed: !transportError && (reader.ended || tornOutstanding),
+    streamError: transportError || (reader.ended ? null : "remote fetch incomplete"),
+  };
+  for (const transcript of pending) settleTranscript(transcript, settled, { cache, index, stats });
+  if (!reader.ended && !failure && !parseError) warnEndedEarly(host);
 }

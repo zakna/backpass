@@ -78,6 +78,29 @@ export async function discover({ cutoffMs }) {
   }
 }
 
+/** One message's parts as events: text parts joined into one message, tool parts kept in order. */
+function messagePartEvents(role, parts) {
+  const events = [];
+  const texts = [];
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.type === "text" && part.text) {
+      texts.push(part.text);
+    } else if (part.type === "tool") {
+      events.push({
+        kind: "tool",
+        name: part.tool || part.name,
+        input: part.state?.input ?? part.input,
+        result: part.state?.output ?? part.output,
+        status: part.state?.status,
+      });
+    }
+    // reasoning / step-start / step-finish / patch / file parts carry no loss signal.
+  }
+  if (texts.length) events.push({ kind: "message", role, text: texts.join("\n") });
+  return events;
+}
+
 export async function read(ref) {
   const db = await openReadOnly(dbPath());
   if (!db) return legacyRead();
@@ -104,24 +127,7 @@ export async function read(ref) {
       const data = safeJsonParse(message.data) || {};
       const role = data.role === "user" ? "user" : "assistant";
       model = model || data.modelID || data.model?.modelID || null;
-
-      const texts = [];
-      for (const part of partsByMessage.get(message.id) || []) {
-        if (!part) continue;
-        if (part.type === "text" && part.text) {
-          texts.push(part.text);
-        } else if (part.type === "tool") {
-          events.push({
-            kind: "tool",
-            name: part.tool || part.name,
-            input: part.state?.input ?? part.input,
-            result: part.state?.output ?? part.output,
-            status: part.state?.status,
-          });
-        }
-        // reasoning / step-start / step-finish / patch / file parts carry no loss signal.
-      }
-      if (texts.length) events.push({ kind: "message", role, text: texts.join("\n") });
+      events.push(...messagePartEvents(role, partsByMessage.get(message.id) || []));
     }
 
     return { events, model };

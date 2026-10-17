@@ -113,19 +113,38 @@ export function initialState(meta) {
 
 /** Reduce one progress event into the render state. Exported for tests. */
 export function reduceEvent(state, event, data, now = Date.now()) {
-  const { discover: d, analyze: a, fold: f, synthesize: s } = state;
-
-  switch (event) {
+  switch (event.split(":")[0]) {
     case "memory":
-      state.memory = {
-        path: data.path,
-        label: data.label || data.path,
-        tokens: data.tokens,
-        budget: data.budget,
-        units: data.units,
-      };
+      reduceMemory(state, data);
       break;
+    case "discover":
+      reduceDiscover(state.discover, event, data, now);
+      break;
+    case "analyze":
+      reduceAnalyze(state.analyze, event, data, now);
+      break;
+    case "fold":
+      reduceFold(state.fold, event, data, now);
+      break;
+    case "synth":
+      reduceSynth(state, event, data, now);
+      break;
+  }
+  return state;
+}
 
+function reduceMemory(state, data) {
+  state.memory = {
+    path: data.path,
+    label: data.label || data.path,
+    tokens: data.tokens,
+    budget: data.budget,
+    units: data.units,
+  };
+}
+
+function reduceDiscover(d, event, data, now) {
+  switch (event) {
     case "discover:start":
       d.status = "active";
       d.startedAt = now;
@@ -154,25 +173,9 @@ export function reduceEvent(state, event, data, now = Date.now()) {
       d.totalMatched = Object.values(d.harnesses).reduce((sum, row) => sum + row.matched, 0);
       break;
     }
-    case "discover:harness:done": {
-      const h = d.harnesses[data.harness];
-      if (data.error) {
-        h.status = "error";
-        h.error = data.error;
-      } else {
-        h.status = "done";
-        h.scanned = data.scanned;
-        h.matched = data.matched;
-        h.newCount = Math.max(data.scanned - (data.cached || 0), 0);
-        h.self = data.self || 0;
-        h.tiers = data.tiers || {};
-        d.storesOk += 1;
-        d.files += data.scanned;
-        d.newFiles += h.newCount;
-      }
-      d.totalMatched = Object.values(d.harnesses).reduce((sum, row) => sum + row.matched, 0);
+    case "discover:harness:done":
+      reduceHarnessDone(d, data);
       break;
-    }
     case "discover:host:start":
       if (!d.hosts[data.host]) {
         d.hostOrder.push(data.host);
@@ -194,7 +197,30 @@ export function reduceEvent(state, event, data, now = Date.now()) {
       d.endedAt = now;
       d.totalMatched = data.total;
       break;
+  }
+}
 
+function reduceHarnessDone(d, data) {
+  const h = d.harnesses[data.harness];
+  if (data.error) {
+    h.status = "error";
+    h.error = data.error;
+  } else {
+    h.status = "done";
+    h.scanned = data.scanned;
+    h.matched = data.matched;
+    h.newCount = Math.max(data.scanned - (data.cached || 0), 0);
+    h.self = data.self || 0;
+    h.tiers = data.tiers || {};
+    d.storesOk += 1;
+    d.files += data.scanned;
+    d.newFiles += h.newCount;
+  }
+  d.totalMatched = Object.values(d.harnesses).reduce((sum, row) => sum + row.matched, 0);
+}
+
+function reduceAnalyze(a, event, data, now) {
+  switch (event) {
     case "analyze:start":
       a.status = "active";
       a.startedAt = now;
@@ -230,7 +256,11 @@ export function reduceEvent(state, event, data, now = Date.now()) {
       a.failed = data.failed;
       a.lanes = [];
       break;
+  }
+}
 
+function reduceFold(f, event, data, now) {
+  switch (event) {
     case "fold:done":
       f.status = "done";
       f.startedAt = now - (data.ms || 0);
@@ -240,7 +270,12 @@ export function reduceEvent(state, event, data, now = Date.now()) {
       f.clustersKept = data.clustersKept;
       f.minGapEvidence = data.minGapEvidence;
       break;
+  }
+}
 
+function reduceSynth(state, event, data, now) {
+  const s = state.synthesize;
+  switch (event) {
     case "synth:start":
       s.status = "active";
       s.startedAt = now;
@@ -276,7 +311,6 @@ export function reduceEvent(state, event, data, now = Date.now()) {
       s.edits = data.edits;
       break;
   }
-  return state;
 }
 
 const PAINT_THROTTLE_MS = 40;

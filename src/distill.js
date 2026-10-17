@@ -102,32 +102,56 @@ export function isBoilerplate(text) {
 export function distill(events, meta, options = {}) {
   const maxTraceTokens = options.maxTraceTokens ?? 12000;
   const lines = [];
-  let userTurns = 0;
-  let assistantTurns = 0;
-  let toolCalls = 0;
-  let turn = 0;
+  const counts = { userTurns: 0, assistantTurns: 0, toolCalls: 0, turn: 0 };
 
   for (const event of events) {
-    if (!event) continue;
-    if (event.kind === "message") {
-      const text = clampMessage(redact(event.text));
-      if (!text || isBoilerplate(text)) continue;
-      turn += 1;
-      if (event.role === "user") userTurns += 1;
-      else assistantTurns += 1;
-      lines.push(`### turn ${turn} · ${event.role}`, text, "");
-    } else if (event.kind === "tool") {
-      toolCalls += 1;
-      const input = redact(describeToolInput(event.input));
-      const result = redact(describeToolResult(event.result));
-      const status = event.status && event.status !== "completed" ? ` [${event.status}]` : "";
-      const arrow = result ? ` -> ${result}` : "";
-      const inputNote = input ? ` ${JSON.stringify(input)}` : "";
-      lines.push(`tool: ${event.name || "unknown"}${inputNote}${status}${arrow}`);
-    }
+    if (event) appendEvent(lines, counts, event);
   }
 
-  const header = [
+  const header = traceHeader(meta);
+  const footer = traceFooter(meta, options);
+
+  const { body, elided } = capTrace(lines.join("\n").trim(), maxTraceTokens);
+  const trace = `${header}\n${body}\n${footer}\n`;
+
+  return {
+    trace,
+    stats: {
+      userTurns: counts.userTurns,
+      assistantTurns: counts.assistantTurns,
+      toolCalls: counts.toolCalls,
+      elided,
+      distilledTokens: estimateTokens(trace),
+    },
+  };
+}
+
+function appendEvent(lines, counts, event) {
+  if (event.kind === "message") appendMessage(lines, counts, event);
+  else if (event.kind === "tool") appendTool(lines, counts, event);
+}
+
+function appendMessage(lines, counts, event) {
+  const text = clampMessage(redact(event.text));
+  if (!text || isBoilerplate(text)) return;
+  counts.turn += 1;
+  if (event.role === "user") counts.userTurns += 1;
+  else counts.assistantTurns += 1;
+  lines.push(`### turn ${counts.turn} · ${event.role}`, text, "");
+}
+
+function appendTool(lines, counts, event) {
+  counts.toolCalls += 1;
+  const input = redact(describeToolInput(event.input));
+  const result = redact(describeToolResult(event.result));
+  const status = event.status && event.status !== "completed" ? ` [${event.status}]` : "";
+  const arrow = result ? ` -> ${result}` : "";
+  const inputNote = input ? ` ${JSON.stringify(input)}` : "";
+  lines.push(`tool: ${event.name || "unknown"}${inputNote}${status}${arrow}`);
+}
+
+function traceHeader(meta) {
+  return [
     `# session ${meta.id}`,
     `harness: ${meta.harness}`,
     meta.model ? `model: ${meta.model}` : null,
@@ -139,37 +163,26 @@ export function distill(events, meta, options = {}) {
   ]
     .filter((l) => l !== null)
     .join("\n");
+}
 
-  const footer = options.transcriptInspector
-    ? [
-        "",
-        "---",
-        `bounded transcript inspector: ${TRANSCRIPT_INSPECTOR_TOOL}`,
-        `transcript reference: ${options.transcriptInspector.ref}`,
-        "The raw transcript path is intentionally hidden for this large session.",
-        `Use ${TRANSCRIPT_INSPECTOR_TOOL} with a focused literal query when an exact quote is not in this trace. It allows at most ${INSPECTOR_SESSION_CALLS} queries; then synthesize from the trace.`,
-      ].join("\n")
-    : [
-        "",
-        "---",
-        `raw transcript: ${meta.rawPath}`,
-        "Tool calls above are one-line summaries and tool output is truncated. Open the raw",
-        "transcript only if a specific claim needs the full text.",
-      ].join("\n");
-
-  const { body, elided } = capTrace(lines.join("\n").trim(), maxTraceTokens);
-  const trace = `${header}\n${body}\n${footer}\n`;
-
-  return {
-    trace,
-    stats: {
-      userTurns,
-      assistantTurns,
-      toolCalls,
-      elided,
-      distilledTokens: estimateTokens(trace),
-    },
-  };
+function traceFooter(meta, options) {
+  if (options.transcriptInspector) {
+    return [
+      "",
+      "---",
+      `bounded transcript inspector: ${TRANSCRIPT_INSPECTOR_TOOL}`,
+      `transcript reference: ${options.transcriptInspector.ref}`,
+      "The raw transcript path is intentionally hidden for this large session.",
+      `Use ${TRANSCRIPT_INSPECTOR_TOOL} with a focused literal query when an exact quote is not in this trace. It allows at most ${INSPECTOR_SESSION_CALLS} queries; then synthesize from the trace.`,
+    ].join("\n");
+  }
+  return [
+    "",
+    "---",
+    `raw transcript: ${meta.rawPath}`,
+    "Tool calls above are one-line summaries and tool output is truncated. Open the raw",
+    "transcript only if a specific claim needs the full text.",
+  ].join("\n");
 }
 
 /**

@@ -218,17 +218,19 @@ export async function probeCandidate(candidate, options = {}) {
   const advertised = result.availableModels || [];
   const resolved = resolveAdvertisedModel(model, advertised, agent, options);
   if (!resolved.id) {
-    let detail;
-    if (resolved.ambiguous) detail = ambiguousModelDetail(resolved.ambiguous);
-    else if (advertised.length) detail = `not among ${advertised.length} advertised model(s)`;
-    else detail = "adapter advertised no models";
-    return { verdict: "model-unavailable", detail, resolvedModel: null };
+    return { verdict: "model-unavailable", detail: unresolvedModelDetail(resolved, advertised), resolvedModel: null };
   }
   const tieBreak = resolved.tieBreak;
   const detail = tieBreak
     ? `preferred subscription provider ${tieBreak.preferred} over ${tieBreak.over.join(", ")}`
     : "";
   return { verdict: "ok", detail, resolvedModel: resolved.id, ...(tieBreak ? { tieBreak } : {}) };
+}
+
+function unresolvedModelDetail(resolved, advertised) {
+  if (resolved.ambiguous) return ambiguousModelDetail(resolved.ambiguous);
+  if (advertised.length) return `not among ${advertised.length} advertised model(s)`;
+  return "adapter advertised no models";
 }
 
 /**
@@ -420,33 +422,11 @@ export class AgentResolver {
     if (this.picks[role]) return this.picks[role];
 
     const pinned = this.pinned(role);
-    if (pinned) {
-      let model = pinned.model;
-      if (model && !model.includes("/") && !TRUSTING_MODEL_AGENTS.has(pinned.agent)) {
-        let entry;
-        try {
-          entry = await this.verdictFor({ agent: pinned.agent, model });
-        } catch (err) {
-          if (err instanceof AcpxError) throw new UserError(err.message, "install acpx (npm i -g acpx) and retry");
-          throw err;
-        }
-        if (entry.verdict !== "ok") throw pinnedResolutionError(role, pinned, entry);
-        model = entry.resolvedModel || model;
-      }
-      this.picks[role] = { ...pinned, model, effort: resolvedEffort(role, pinned.agent, this.config) };
-      return this.picks[role];
-    }
+    if (pinned) return this.resolvePinned(role, pinned);
 
     const trail = [];
     for (const candidate of this.ladder(role)) {
-      let entry;
-      try {
-        entry = await this.verdictFor(candidate);
-      } catch (err) {
-        // acpx itself is missing: one clean error, not one per candidate.
-        if (err instanceof AcpxError) throw new UserError(err.message, "install acpx (npm i -g acpx) and retry");
-        throw err;
-      }
+      const entry = await this.verdictOrUserError(candidate);
       trail.push({ ...candidate, ...entry });
       if (entry.verdict === "ok") {
         this.picks[role] = {
@@ -462,6 +442,27 @@ export class AgentResolver {
       }
     }
     throw exhaustedError(role, trail);
+  }
+
+  async resolvePinned(role, pinned) {
+    let model = pinned.model;
+    if (model && !model.includes("/") && !TRUSTING_MODEL_AGENTS.has(pinned.agent)) {
+      const entry = await this.verdictOrUserError({ agent: pinned.agent, model });
+      if (entry.verdict !== "ok") throw pinnedResolutionError(role, pinned, entry);
+      model = entry.resolvedModel || model;
+    }
+    this.picks[role] = { ...pinned, model, effort: resolvedEffort(role, pinned.agent, this.config) };
+    return this.picks[role];
+  }
+
+  /** acpx itself missing is one clean error, not one per candidate. */
+  async verdictOrUserError(candidate) {
+    try {
+      return await this.verdictFor(candidate);
+    } catch (err) {
+      if (err instanceof AcpxError) throw new UserError(err.message, "install acpx (npm i -g acpx) and retry");
+      throw err;
+    }
   }
 
   announce(role, pick, trail) {
@@ -522,11 +523,11 @@ export class AgentResolver {
       try {
         return await fn(pick);
       } catch (err) {
-        const isAcpxError = err instanceof AcpxError;
-        const verdict = isAcpxError ? classifyAcpxFailure(err) : null;
-        if (isAcpxError && pick.pinned) throw pinnedFailureError(role, pick, verdict, err);
+        if (!(err instanceof AcpxError)) throw err;
+        const verdict = classifyAcpxFailure(err);
+        if (pick.pinned) throw pinnedFailureError(role, pick, verdict, err);
         if (!verdict) throw err;
-        await this.demote(role, pick, verdict, err.message, isAcpxError ? err.stderr : "");
+        await this.demote(role, pick, verdict, err.message, err.stderr);
       }
     }
   }

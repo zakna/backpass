@@ -50,42 +50,30 @@ export function parseMemoryUnits(text) {
   const lines = text.split("\n");
   const units = [];
   const headings = [];
+  const fence = { open: false, marker: null };
 
   let buffer = [];
   let bufferStart = 0;
-  let inFence = false;
-  let fenceMarker = null;
 
   const flush = (endLine) => {
-    const raw = buffer.join("\n");
-    if (raw.trim()) {
-      units.push({
-        text: raw.replace(/\s+$/, ""),
-        section: headings.join(" > "),
-        startLine: bufferStart + 1,
-        endLine,
-      });
-    }
+    pushUnit(units, buffer, headings, bufferStart, endLine);
     buffer = [];
+  };
+  const add = (line, i) => {
+    if (!buffer.length) bufferStart = i;
+    buffer.push(line);
   };
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
 
     if (FENCE.test(line)) {
-      const marker = line.trim().slice(0, 3);
-      if (!inFence) {
-        inFence = true;
-        fenceMarker = marker;
-      } else if (marker === fenceMarker) {
-        inFence = false;
-      }
-      if (!buffer.length) bufferStart = i;
-      buffer.push(line);
+      trackFence(fence, line);
+      add(line, i);
       continue;
     }
 
-    if (inFence) {
+    if (fence.open) {
       buffer.push(line);
       continue;
     }
@@ -93,26 +81,17 @@ export function parseMemoryUnits(text) {
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       flush(i);
-      const depth = heading[1].length;
-      headings.length = Math.min(headings.length, depth - 1);
-      headings[depth - 1] = heading[2].trim();
-      for (let d = 0; d < depth - 1; d += 1) headings[d] = headings[d] ?? "";
+      applyHeading(headings, heading);
       continue;
     }
 
-    const isListItem = /^\s*([-*+]|\d+[.)])\s+/.test(line);
-    const isBlank = line.trim() === "";
-
-    if (isBlank) {
+    if (line.trim() === "") {
       flush(i);
       continue;
     }
     // A new list item starts a new unit; continuation lines stay with it.
-    if (isListItem && buffer.length && /^\s*([-*+]|\d+[.)])\s+/.test(buffer[0])) {
-      flush(i);
-    }
-    if (!buffer.length) bufferStart = i;
-    buffer.push(line);
+    if (continuesListRun(line, buffer)) flush(i);
+    add(line, i);
   }
   flush(lines.length);
 
@@ -126,6 +105,42 @@ export function parseMemoryUnits(text) {
     const parts = attributionParts(base);
     return parts ? { ...base, parts } : base;
   });
+}
+
+const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
+
+/** A list item directly after another list item starts a new unit. */
+function continuesListRun(line, buffer) {
+  return LIST_ITEM.test(line) && buffer.length > 0 && LIST_ITEM.test(buffer[0]);
+}
+
+function pushUnit(units, buffer, headings, bufferStart, endLine) {
+  const raw = buffer.join("\n");
+  if (!raw.trim()) return;
+  units.push({
+    text: raw.replace(/\s+$/, ""),
+    section: headings.join(" > "),
+    startLine: bufferStart + 1,
+    endLine,
+  });
+}
+
+/** A fence line opens a block, or closes it when its marker matches the opening one. */
+function trackFence(fence, line) {
+  const marker = line.trim().slice(0, 3);
+  if (!fence.open) {
+    fence.open = true;
+    fence.marker = marker;
+  } else if (marker === fence.marker) {
+    fence.open = false;
+  }
+}
+
+function applyHeading(headings, heading) {
+  const depth = heading[1].length;
+  headings.length = Math.min(headings.length, depth - 1);
+  headings[depth - 1] = heading[2].trim();
+  for (let d = 0; d < depth - 1; d += 1) headings[d] = headings[d] ?? "";
 }
 
 function isListItemText(text) {
@@ -179,68 +194,52 @@ function confidentSentenceBoundary(text, sentenceStart, terminator) {
   while (visibleNext < text.length && /["'([{*`_~\u2018\u201c]/u.test(text[visibleNext])) visibleNext += 1;
   if (visibleNext >= text.length || !/[\p{L}\p{N}$@/\\]/u.test(text[visibleNext])) return null;
 
-  if (text[terminator] === ".") {
-    if (terminator === 0 || /\s/u.test(text[terminator - 1])) return null;
-    const beforeTerminator = text.slice(sentenceStart, terminator);
-    const precedingToken = beforeTerminator.match(/\S+$/u)?.[0] || "";
-    if (/[\\/]/u.test(precedingToken)) {
-      const nextTokens = text.slice(next).trimStart().split(/\s+/u).slice(0, 2).join(" ");
-      const finalPathSegment = precedingToken.split(/[\\/]/u).at(-1) || "";
-      const pathEndsWithExtension = /\.[\p{L}\p{N}]+$/u.test(finalPathSegment);
-      if (/[\\/]/u.test(nextTokens) && !pathEndsWithExtension) return null;
-    }
-    const rawPrefix = beforeTerminator.trim();
-    if (/^\d+$/u.test(rawPrefix)) return null;
-    const prefix = rawPrefix.replace(/["')\]}*`_~\u2019\u201d]+$/u, "");
-    const token = prefix.match(/([\p{L}\p{N}.]+)$/u)?.[1] || "";
-    if (!token) return null;
-    if (ABBREVIATIONS.has(token.toLowerCase()) || /^\p{L}$/u.test(token) || /^(?:\p{L}\.)+\p{L}$/u.test(token)) {
-      return null;
-    }
-  }
+  if (text[terminator] === "." && !periodEndsSentence(text, sentenceStart, terminator, next)) return null;
 
   return { end, next };
+}
+
+/** Whether a "." is a real sentence end rather than a path, number, initial or abbreviation. */
+function periodEndsSentence(text, sentenceStart, terminator, next) {
+  if (terminator === 0 || /\s/u.test(text[terminator - 1])) return false;
+  const beforeTerminator = text.slice(sentenceStart, terminator);
+  const precedingToken = beforeTerminator.match(/\S+$/u)?.[0] || "";
+  if (/[\\/]/u.test(precedingToken) && pathContinues(text, next, precedingToken)) return false;
+  const rawPrefix = beforeTerminator.trim();
+  if (/^\d+$/u.test(rawPrefix)) return false;
+  const prefix = rawPrefix.replace(/["')\]}*`_~\u2019\u201d]+$/u, "");
+  const token = prefix.match(/([\p{L}\p{N}.]+)$/u)?.[1] || "";
+  if (!token) return false;
+  return !isAbbreviationToken(token);
+}
+
+/** A path-like token followed by another path, with no file extension on the first. */
+function pathContinues(text, next, precedingToken) {
+  const nextTokens = text.slice(next).trimStart().split(/\s+/u).slice(0, 2).join(" ");
+  const finalPathSegment = precedingToken.split(/[\\/]/u).at(-1) || "";
+  const pathEndsWithExtension = /\.[\p{L}\p{N}]+$/u.test(finalPathSegment);
+  return /[\\/]/u.test(nextTokens) && !pathEndsWithExtension;
+}
+
+function isAbbreviationToken(token) {
+  return ABBREVIATIONS.has(token.toLowerCase()) || /^\p{L}$/u.test(token) || /^(?:\p{L}\.)+\p{L}$/u.test(token);
 }
 
 export function splitAttributionSentences(text) {
   const sentences = [];
   let start = 0;
-  let codeDelimiter = 0;
-  let quotedPathEnd = -1;
+  const scan = { codeDelimiter: 0, quotedPathEnd: -1 };
   for (let i = 0; i < text.length; i += 1) {
     let backslashes = 0;
     while (text[i - backslashes - 1] === "\\") backslashes += 1;
     const escaped = backslashes % 2 === 1;
 
     if (text[i] === "`") {
-      let run = 1;
-      while (text[i + run] === "`") run += 1;
-      if (!escaped) {
-        if (codeDelimiter === 0) codeDelimiter = run;
-        else if (codeDelimiter === run) codeDelimiter = 0;
-      }
-      i += run - 1;
+      i = scanBacktickRun(text, i, escaped, scan);
       continue;
     }
-    if (codeDelimiter) continue;
-
-    if (i === quotedPathEnd) {
-      quotedPathEnd = -1;
-      continue;
-    }
-    if (quotedPathEnd > i) continue;
-    if (!escaped && ['"', "'"].includes(text[i])) {
-      let closing = i + 1;
-      while (closing < text.length) {
-        if (text[closing] === text[i] && text[closing - 1] !== "\\") break;
-        closing += 1;
-      }
-      const value = text.slice(i + 1, closing);
-      if (closing < text.length && /[\\/]/u.test(value)) {
-        quotedPathEnd = closing;
-        continue;
-      }
-    }
+    if (scan.codeDelimiter) continue;
+    if (skipQuotedPath(text, i, escaped, scan)) continue;
 
     if (![".", "!", "?"].includes(text[i])) continue;
     const boundary = confidentSentenceBoundary(text, start, i);
@@ -251,6 +250,38 @@ export function splitAttributionSentences(text) {
   }
   sentences.push(text.slice(start).trim());
   return sentences.length >= 2 ? sentences.filter(Boolean) : [];
+}
+
+/** Toggle code-span state on a backtick run; returns the index of the run's last backtick. */
+function scanBacktickRun(text, i, escaped, scan) {
+  let run = 1;
+  while (text[i + run] === "`") run += 1;
+  if (!escaped) {
+    if (scan.codeDelimiter === 0) scan.codeDelimiter = run;
+    else if (scan.codeDelimiter === run) scan.codeDelimiter = 0;
+  }
+  return i + run - 1;
+}
+
+/** True when index `i` sits inside, or opens, a quoted path whose dots must not end a sentence. */
+function skipQuotedPath(text, i, escaped, scan) {
+  if (i === scan.quotedPathEnd) {
+    scan.quotedPathEnd = -1;
+    return true;
+  }
+  if (scan.quotedPathEnd > i) return true;
+  if (escaped || !['"', "'"].includes(text[i])) return false;
+  let closing = i + 1;
+  while (closing < text.length) {
+    if (text[closing] === text[i] && text[closing - 1] !== "\\") break;
+    closing += 1;
+  }
+  const value = text.slice(i + 1, closing);
+  if (closing < text.length && /[\\/]/u.test(value)) {
+    scan.quotedPathEnd = closing;
+    return true;
+  }
+  return false;
 }
 
 function attributionParts(unit) {

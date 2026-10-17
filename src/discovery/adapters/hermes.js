@@ -168,6 +168,14 @@ function decodeContent(content) {
   return parsed == null ? text : parsed;
 }
 
+/** Decode a call's arguments: a JSON string becomes its value, anything unparseable stays as-is. */
+function callInput(fn, call) {
+  const input = fn.arguments ?? call.arguments;
+  if (typeof input !== "string") return input;
+  const parsedInput = safeJsonParse(input);
+  return parsedInput !== null ? parsedInput : input;
+}
+
 function emitTools(raw, events, idAlias) {
   const text = sqliteText(raw);
   const parsed = typeof text === "string" ? safeJsonParse(text) : text;
@@ -176,15 +184,29 @@ function emitTools(raw, events, idAlias) {
     if (!call || typeof call !== "object") continue;
     const fn = call.function && typeof call.function === "object" ? call.function : {};
     const name = fn.name || call.name;
-    let input = fn.arguments ?? call.arguments;
-    if (typeof input === "string") {
-      const parsedInput = safeJsonParse(input);
-      if (parsedInput !== null) input = parsedInput;
-    }
+    const input = callInput(fn, call);
     const pendingId = call.id || call.call_id;
     if (call.id) idAlias.set(call.id, pendingId);
     if (call.call_id) idAlias.set(call.call_id, pendingId);
     events.push({ kind: "tool", name, input, pendingId });
+  }
+}
+
+/** One message row as events; `session_meta` rows and unknown roles contribute none. */
+function rowEvents(row, events, idAlias) {
+  const role = row.role;
+  if (role === "session_meta") return;
+  const content = decodeContent(row.content);
+  if (role === "user" || role === "assistant") {
+    contentToEvents(role, content, events);
+    if (role === "assistant") emitTools(row.tool_calls, events, idAlias);
+  } else if (role === "tool") {
+    events.push({
+      kind: "tool-result",
+      id: idAlias.get(row.tool_call_id) || row.tool_call_id,
+      result: content,
+      status: "completed",
+    });
   }
 }
 
@@ -206,24 +228,7 @@ export async function read(ref) {
 
     const events = [];
     const idAlias = new Map();
-    for (const row of rows) {
-      const role = row.role;
-      if (role === "session_meta") continue;
-      const content = decodeContent(row.content);
-      if (role === "user" || role === "assistant") {
-        contentToEvents(role, content, events);
-        if (role === "assistant") emitTools(row.tool_calls, events, idAlias);
-        continue;
-      }
-      if (role === "tool") {
-        events.push({
-          kind: "tool-result",
-          id: idAlias.get(row.tool_call_id) || row.tool_call_id,
-          result: content,
-          status: "completed",
-        });
-      }
-    }
+    for (const row of rows) rowEvents(row, events, idAlias);
     return { events: attachToolResults(events), model: ref.model || null };
   } catch {
     return { events: [], model: ref.model || null };

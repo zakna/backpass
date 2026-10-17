@@ -49,21 +49,8 @@ export async function bootstrapRun(ctx, deps = {}) {
   }
 }
 
-async function bootstrapRunCore(ctx, deps) {
-  const { repo, config } = ctx;
-  const discover = deps.discover || discoverForRun;
-  const analyze = deps.analyze || analyzeTranscripts;
-  const synthesize = deps.synthesize || synthesizeProposal;
-  const fold = deps.fold || foldForRun;
-  const prefetch = deps.prefetch || ((pending) => prefetchRemoteTranscripts(pending, { config }));
-  const { canonical, pointer } = bootstrapTargets(config.memoryFiles);
-
-  const { transcripts, perHarness } = capTranscripts(await discover(ctx), config);
-  info(
-    `${color.yellow("·")} no memory file found (looked for ${config.memoryFiles.join(", ")}) - ` +
-      `bootstrapping ${canonical} from ${transcripts.length} transcript(s) + defaults`,
-  );
-
+/** Write the starter files and re-read them, refusing if anything moved underneath us. */
+function seedMemoryFile({ repo, config }, canonical, pointer) {
   const starter = starterMemoryFile(repo, canonical);
   const seed = [{ path: canonical, text: starter.text }];
   if (pointer) seed.push({ path: pointer, text: renderPointer(canonical) });
@@ -79,8 +66,25 @@ async function bootstrapRunCore(ctx, deps) {
       "run `backpass` again to analyze the memory file that now exists",
     );
   }
-  const memoryFile = resolved.primary;
-  const memoryHash = resolved.hash;
+  return { seeded, memoryFile: resolved.primary, memoryHash: resolved.hash };
+}
+
+async function bootstrapRunCore(ctx, deps) {
+  const { repo, config } = ctx;
+  const discover = deps.discover || discoverForRun;
+  const analyze = deps.analyze || analyzeTranscripts;
+  const synthesize = deps.synthesize || synthesizeProposal;
+  const fold = deps.fold || foldForRun;
+  const prefetch = deps.prefetch || ((pending) => prefetchRemoteTranscripts(pending, { config }));
+  const { canonical, pointer } = bootstrapTargets(config.memoryFiles);
+
+  const { transcripts, perHarness } = capTranscripts(await discover(ctx), config);
+  info(
+    `${color.yellow("·")} no memory file found (looked for ${config.memoryFiles.join(", ")}) - ` +
+      `bootstrapping ${canonical} from ${transcripts.length} transcript(s) + defaults`,
+  );
+
+  const { seeded, memoryFile, memoryHash } = seedMemoryFile(ctx, canonical, pointer);
 
   emitProgress("memory", {
     path: memoryFile.path,

@@ -224,19 +224,7 @@ function replaceOnce(text, find, replace, label, file) {
  * is still honored so a proposal saved by an earlier version stays applicable.
  */
 export function applyEdit(text, edit) {
-  if (Array.isArray(edit.hunks)) {
-    let current = text;
-    for (const hunk of edit.hunks) {
-      const label = `edit ${edit.id} (${hunk.id || "hunk"})`;
-      if (!hunk.find) {
-        if (current !== "") throw new Error(`${label}: ${edit.file} is no longer empty`);
-        current = hunk.replace;
-        continue;
-      }
-      current = replaceOnce(current, hunk.find, hunk.replace, label, edit.file);
-    }
-    return current;
-  }
+  if (Array.isArray(edit.hunks)) return applyHunks(text, edit);
 
   if (edit.find) return replaceOnce(text, edit.find, edit.replace, `edit ${edit.id}`, edit.file);
 
@@ -253,6 +241,20 @@ export function applyEdit(text, edit) {
     throw new Error(`edit ${edit.id}: "anchor" text appears ${found} times in ${edit.file}; must be unique`);
   const at = text.indexOf(edit.anchor) + edit.anchor.length;
   return `${text.slice(0, at)}\n\n${edit.replace}${text.slice(at)}`;
+}
+
+function applyHunks(text, edit) {
+  let current = text;
+  for (const hunk of edit.hunks) {
+    const label = `edit ${edit.id} (${hunk.id || "hunk"})`;
+    if (hunk.find) {
+      current = replaceOnce(current, hunk.find, hunk.replace, label, edit.file);
+      continue;
+    }
+    if (current !== "") throw new Error(`${label}: ${edit.file} is no longer empty`);
+    current = hunk.replace;
+  }
+  return current;
 }
 
 /** Apply a set of edits to one file, in order. */

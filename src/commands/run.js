@@ -8,6 +8,57 @@ import { skillDescriptionTokens } from "../skills.js";
 import { startTui } from "../tui/index.js";
 import { resolveMemoryFiles } from "../memory.js";
 
+/** A repo with no memory file bootstraps one, except where that would be wrong; name why. */
+function assertBootstrapAllowed({ scope, config }) {
+  if (config.target?.kind === "skill") {
+    throw new UserError(
+      `no memory file found (looked for ${config.memoryFiles.join(", ")}); a targeted run never bootstraps one`,
+      "run `backpass` without --target to bootstrap an AGENTS.md first",
+    );
+  }
+  if (scope?.kind === "user") {
+    throw new UserError(
+      `no user memory file found (looked for ${config.memoryFiles.join(", ")})`,
+      "set user.memoryFiles in ~/.config/backpass/config.json",
+    );
+  }
+}
+
+function printNoTranscripts(scope) {
+  if (scope?.kind === "user") {
+    out("No agent transcripts found for user scope yet.");
+    out(color.dim("  `backpass scan --scope user --since all` widens the time window."));
+    return;
+  }
+  out("No agent transcripts are associated with this repo yet.");
+  out(
+    color.dim("  `backpass scan --since all` widens the time window; --include-cursor-ide adds the Cursor IDE store."),
+  );
+}
+
+function printAnalysisBanner(analysis, config) {
+  // The banner shows what the gate measures: the always-loaded surface, which is the
+  // memory file plus every skill description line.
+  const descriptionTokens = skillDescriptionTokens(analysis.skills || []);
+  const alwaysLoaded = analysis.file.tokens + descriptionTokens;
+  const budget = budgetBar({
+    utilization: alwaysLoaded / config.budgetTokens,
+    withinBudget: alwaysLoaded <= config.budgetTokens,
+  });
+  info(
+    `${color.cyan("·")} ${analysis.file.path}${descriptionTokens ? " + skill descriptions" : ""}: ${budget} ` +
+      `${formatTokens(alwaysLoaded)} / ` +
+      `${formatTokens(config.budgetTokens)} tok · ${analysis.file.units.length} instructions`,
+  );
+
+  if (analysis.summary) {
+    info(
+      `${color.cyan("·")} evidence: ${analysis.summary.analyzed} new · ${analysis.summary.cached} cached · ` +
+        `${analysis.summary.skipped} too short · ${analysis.summary.failed} failed`,
+    );
+  }
+}
+
 /**
  * The default command: one full backward pass.
  *
@@ -32,18 +83,7 @@ export async function cmdRun(ctx) {
     config.state.clearProposal();
 
     if (!resolveMemoryFiles(repo.root, config.memoryFiles, { allowExternal: scope?.kind === "user" }).primary) {
-      if (config.target?.kind === "skill") {
-        throw new UserError(
-          `no memory file found (looked for ${config.memoryFiles.join(", ")}); a targeted run never bootstraps one`,
-          "run `backpass` without --target to bootstrap an AGENTS.md first",
-        );
-      }
-      if (scope?.kind === "user") {
-        throw new UserError(
-          `no user memory file found (looked for ${config.memoryFiles.join(", ")})`,
-          "set user.memoryFiles in ~/.config/backpass/config.json",
-        );
-      }
+      assertBootstrapAllowed(ctx);
       const result = await bootstrapRun(ctx);
       tui?.stop();
       if (ctx.flags.json) bootstrapJson(result);
@@ -56,40 +96,11 @@ export async function cmdRun(ctx) {
     if (!analysis.transcripts.length) {
       tui?.stop();
       out("");
-      if (scope?.kind === "user") {
-        out("No agent transcripts found for user scope yet.");
-        out(color.dim("  `backpass scan --scope user --since all` widens the time window."));
-      } else {
-        out("No agent transcripts are associated with this repo yet.");
-        out(
-          color.dim(
-            "  `backpass scan --since all` widens the time window; --include-cursor-ide adds the Cursor IDE store.",
-          ),
-        );
-      }
+      printNoTranscripts(scope);
       return 0;
     }
 
-    // The banner shows what the gate measures: the always-loaded surface, which is the
-    // memory file plus every skill description line.
-    const descriptionTokens = skillDescriptionTokens(analysis.skills || []);
-    const alwaysLoaded = analysis.file.tokens + descriptionTokens;
-    const budget = budgetBar({
-      utilization: alwaysLoaded / config.budgetTokens,
-      withinBudget: alwaysLoaded <= config.budgetTokens,
-    });
-    info(
-      `${color.cyan("·")} ${analysis.file.path}${descriptionTokens ? " + skill descriptions" : ""}: ${budget} ` +
-        `${formatTokens(alwaysLoaded)} / ` +
-        `${formatTokens(config.budgetTokens)} tok · ${analysis.file.units.length} instructions`,
-    );
-
-    if (analysis.summary) {
-      info(
-        `${color.cyan("·")} evidence: ${analysis.summary.analyzed} new · ${analysis.summary.cached} cached · ` +
-          `${analysis.summary.skipped} too short · ${analysis.summary.failed} failed`,
-      );
-    }
+    printAnalysisBanner(analysis, config);
 
     const { proposal } = await runProposal(ctx, analysis);
     tui?.stop();

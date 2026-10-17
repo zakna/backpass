@@ -23,6 +23,17 @@ function journalPath(snapshotPath) {
   return snapshotPath.replace(/\.json$/, ".journal.jsonl");
 }
 
+/** Journal-appended messages, skipping any whose id the snapshot (or an earlier entry) already has. */
+function appendNewMessages(appended, messages, seenMessageIds) {
+  if (!Array.isArray(appended)) return;
+  for (const message of appended) {
+    const id = message?.id;
+    if (id && seenMessageIds.has(id)) continue;
+    if (id) seenMessageIds.add(id);
+    messages.push(message);
+  }
+}
+
 function sessionData(snapshotPath) {
   const snapshot = readJsonFile(snapshotPath);
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
@@ -36,13 +47,7 @@ function sessionData(snapshotPath) {
     if (entry.meta && typeof entry.meta === "object" && !Array.isArray(entry.meta)) {
       Object.assign(data, entry.meta);
     }
-    if (!Array.isArray(entry.append_messages)) continue;
-    for (const message of entry.append_messages) {
-      const id = message?.id;
-      if (id && seenMessageIds.has(id)) continue;
-      if (id) seenMessageIds.add(id);
-      messages.push(message);
-    }
+    appendNewMessages(entry.append_messages, messages, seenMessageIds);
   }
 
   data.messages = messages;

@@ -65,32 +65,32 @@ export function classifyInteraction(transcript) {
 
   const harness = transcript?.harness;
   const signals = signalsOf(transcript);
-  const cwd = transcript?.cwd;
 
-  if (harness === "codex") {
+  if (harnessIsNonInteractive(harness, signals, transcript)) return NON_INTERACTIVE;
+  if (pathLooksNonInteractive(transcript?.cwd)) return NON_INTERACTIVE;
+
+  return INTERACTIVE;
+}
+
+/** Per-harness non-interactive signals; a harness with no entry carries none. */
+const HARNESS_SIGNALS = {
+  codex(signals) {
     const originator = String(signals.originator || "")
       .toLowerCase()
       .replaceAll("-", "_");
     const source = String(signals.source || "").toLowerCase();
-    if (CODEX_NONINTERACTIVE_ORIGINATORS.has(originator) || CODEX_NONINTERACTIVE_SOURCES.has(source)) {
-      return NON_INTERACTIVE;
-    }
-  }
-
-  if (harness === "claude" && claudeEntrypointIsNonInteractive(signals.entrypoint)) {
-    return NON_INTERACTIVE;
-  }
-
-  if (harness === "opencode" && signals.parentId) return NON_INTERACTIVE;
-
-  if (harness === "hermes") {
+    return CODEX_NONINTERACTIVE_ORIGINATORS.has(originator) || CODEX_NONINTERACTIVE_SOURCES.has(source);
+  },
+  claude: (signals) => claudeEntrypointIsNonInteractive(signals.entrypoint),
+  opencode: (signals) => Boolean(signals.parentId),
+  hermes(signals, transcript) {
     const source = String(signals.source || transcript?.extra?.source || "").toLowerCase();
-    if (HERMES_NONINTERACTIVE_SOURCES.has(source)) return NON_INTERACTIVE;
-  }
+    return HERMES_NONINTERACTIVE_SOURCES.has(source);
+  },
+};
 
-  if (pathLooksNonInteractive(cwd)) return NON_INTERACTIVE;
-
-  return INTERACTIVE;
+function harnessIsNonInteractive(harness, signals, transcript) {
+  return Object.hasOwn(HARNESS_SIGNALS, harness) && HARNESS_SIGNALS[harness](signals, transcript);
 }
 
 export function corpusMix(transcripts) {

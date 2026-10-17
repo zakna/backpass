@@ -71,62 +71,8 @@ export function prepareWorkspace({
   }));
   const unstageable = [];
   const stagedIdentities = new Map();
-  for (const { logical: sourceDir, staged: stagedDir, source: skillsSource } of skillMappings) {
-    if (!fs.existsSync(skillsSource) || !fs.statSync(skillsSource).isDirectory()) continue;
-    const confined = [];
-    const toLogical = (relative) =>
-      path.isAbsolute(sourceDir) ? path.join(sourceDir, relative) : path.posix.join(sourceDir, relative);
-    for (const relative of walkFiles(skillsSource, "", confineTo, confined)) {
-      const from = path.join(skillsSource, relative);
-      const logical = toLogical(relative);
-      const identity = realPath(from);
-      // A link can land in a store nothing may write - the layout this whole change
-      // exists to follow - and that is true of a vendored directory inside the repository
-      // as much as of a nix store outside it. Apply refuses such a path and that refusal
-      // drops the round, so staging declares it read-only instead of offering the edit.
-      // It is decided for every loaded skill, before a narrowed run drops the ones it does
-      // not write, so "backpass will never write this file" means the same thing on both.
-      const refusal = stagingRefusal(from, confineTo);
-      if (refusal) {
-        unstageable.push({ path: logical, reason: refusal, identity });
-        continue;
-      }
-      if (stagedSkills && !stagedSkills.includes(logical)) continue;
-      // Two links to one library are two names the harness loads, so both are walked and
-      // both are billed - but one file cannot be two independently editable copies, and
-      // apply refuses a round whose targets collide. The first name owns the write. This
-      // one stays behind the narrowing: only a staged name can own anything.
-      const owner = identity && stagedIdentities.get(identity);
-      if (owner) {
-        unstageable.push({ path: logical, reason: `the same file is already staged as ${owner}` });
-        continue;
-      }
-      const staged = path.posix.join(stagedDir, relative);
-      const to = path.join(root, staged);
-      // Following links means `from` can be any file in a foreign store, so a store this
-      // user cannot read is skipped and named the way `loadSkills` skips one - never an
-      // errno thrown out of workspace preparation.
-      try {
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        fs.copyFileSync(from, to);
-        // The agent edits this copy in place, so it must be writable whatever the source's
-        // mode is - a store-managed library is commonly read-only. Only the copy is
-        // touched; the source keeps its own mode, and apply takes the mode it writes from
-        // the repository file rather than from here.
-        fs.chmodSync(to, (fs.statSync(from).mode & 0o777) | 0o600);
-        originals.set(logical, fs.readFileSync(from, "utf8"));
-      } catch (err) {
-        fs.rmSync(to, { force: true });
-        originals.delete(logical);
-        unstageable.push({ path: logical, reason: READ_ONLY_UNREADABLE });
-        warn(`${logical} could not be read (${err.message}); it stays out of the staging copy`);
-        continue;
-      }
-      if (identity) stagedIdentities.set(identity, logical);
-      stagedPaths.set(logical, staged);
-    }
-    unstageable.push(...confined.map((relative) => ({ path: toLogical(relative), reason: READ_ONLY_OUTSIDE_REPO })));
-  }
+  const ctx = { root, confineTo, stagedSkills, originals, stagedPaths, unstageable, stagedIdentities };
+  for (const mapping of skillMappings) stageSkillMapping(ctx, mapping);
   fs.mkdirSync(path.join(root, workspacePathFor(skillsDir)), { recursive: true });
 
   return {
@@ -142,6 +88,68 @@ export function prepareWorkspace({
     unstageable,
     stagedIdentities,
   };
+}
+
+/** Stage every loadable file under one skill directory mapping into the staging copy. */
+function stageSkillMapping(ctx, { logical: sourceDir, staged: stagedDir, source: skillsSource }) {
+  if (!fs.existsSync(skillsSource) || !fs.statSync(skillsSource).isDirectory()) return;
+  const confined = [];
+  const toLogical = (relative) =>
+    path.isAbsolute(sourceDir) ? path.join(sourceDir, relative) : path.posix.join(sourceDir, relative);
+  for (const relative of walkFiles(skillsSource, "", ctx.confineTo, confined)) {
+    stageSkillFile(ctx, { relative, skillsSource, stagedDir, logical: toLogical(relative) });
+  }
+  ctx.unstageable.push(...confined.map((relative) => ({ path: toLogical(relative), reason: READ_ONLY_OUTSIDE_REPO })));
+}
+
+function stageSkillFile(ctx, { relative, skillsSource, stagedDir, logical }) {
+  const { root, confineTo, stagedSkills, originals, stagedPaths, unstageable, stagedIdentities } = ctx;
+  const from = path.join(skillsSource, relative);
+  const identity = realPath(from);
+  // A link can land in a store nothing may write - the layout this whole change
+  // exists to follow - and that is true of a vendored directory inside the repository
+  // as much as of a nix store outside it. Apply refuses such a path and that refusal
+  // drops the round, so staging declares it read-only instead of offering the edit.
+  // It is decided for every loaded skill, before a narrowed run drops the ones it does
+  // not write, so "backpass will never write this file" means the same thing on both.
+  const refusal = stagingRefusal(from, confineTo);
+  if (refusal) {
+    unstageable.push({ path: logical, reason: refusal, identity });
+    return;
+  }
+  if (stagedSkills && !stagedSkills.includes(logical)) return;
+  // Two links to one library are two names the harness loads, so both are walked and
+  // both are billed - but one file cannot be two independently editable copies, and
+  // apply refuses a round whose targets collide. The first name owns the write. This
+  // one stays behind the narrowing: only a staged name can own anything.
+  const owner = identity && stagedIdentities.get(identity);
+  if (owner) {
+    unstageable.push({ path: logical, reason: `the same file is already staged as ${owner}` });
+    return;
+  }
+  const staged = path.posix.join(stagedDir, relative);
+  const to = path.join(root, staged);
+  // Following links means `from` can be any file in a foreign store, so a store this
+  // user cannot read is skipped and named the way `loadSkills` skips one - never an
+  // errno thrown out of workspace preparation.
+  try {
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+    // The agent edits this copy in place, so it must be writable whatever the source's
+    // mode is - a store-managed library is commonly read-only. Only the copy is
+    // touched; the source keeps its own mode, and apply takes the mode it writes from
+    // the repository file rather than from here.
+    fs.chmodSync(to, (fs.statSync(from).mode & 0o777) | 0o600);
+    originals.set(logical, fs.readFileSync(from, "utf8"));
+  } catch (err) {
+    fs.rmSync(to, { force: true });
+    originals.delete(logical);
+    unstageable.push({ path: logical, reason: READ_ONLY_UNREADABLE });
+    warn(`${logical} could not be read (${err.message}); it stays out of the staging copy`);
+    return;
+  }
+  if (identity) stagedIdentities.set(identity, logical);
+  stagedPaths.set(logical, staged);
 }
 
 /** Resolved identity of a path, or null when it cannot be resolved (broken link). */
@@ -210,37 +218,38 @@ function walkFiles(dir, prefix = "", confineTo = null, confined = []) {
     // library, and those are the files the harness loads. Staging copies what it finds,
     // so an edit lands in the staging copy and never writes through a link.
     const target = entryKind(dir, entry);
-    if (target === "dir") {
-      const child = path.join(dir, entry.name);
-      const identity = realPath(child);
-      if (!identity) continue;
-      // Pruned here, but named: the caller tells the model these are read-only rather
-      // than letting a proposed edit to one be discarded without a reason.
-      if (!withinRoot(confineTo, identity)) {
-        confined.push(relative);
-        continue;
-      }
-      // A link may point at anything - in the layout that motivated following links at
-      // all, a whole plugin repository. Only the file the skill layout loads is taken,
-      // so the target's subtree is never walked, copied, or read.
-      //
-      // This is also the whole reason a cycle cannot be walked. A self link, a link back
-      // to an ancestor and a mutual pair are all directory links, and none of them is
-      // descended into; a real directory is always deeper than its parents, so ordinary
-      // recursion terminates. Anyone restoring subtree walking under a symlinked directory
-      // must reinstate cycle detection in the same change, or the walk recurses until the
-      // stack blows.
-      if (entry.isSymbolicLink()) {
-        const leaf = path.join(child, SKILL_FILENAME);
-        if (prefix === "" && isFile(leaf)) take(leaf, path.posix.join(relative, SKILL_FILENAME));
-        continue;
-      }
-      out.push(...walkFiles(child, relative, confineTo, confined));
-    } else if (target === "file") {
-      take(path.join(dir, entry.name), relative);
-    }
+    if (target === "dir") walkDirectory({ dir, entry, relative, prefix, confineTo, confined, out, take });
+    else if (target === "file") take(path.join(dir, entry.name), relative);
   }
   return out;
+}
+
+function walkDirectory({ dir, entry, relative, prefix, confineTo, confined, out, take }) {
+  const child = path.join(dir, entry.name);
+  const identity = realPath(child);
+  if (!identity) return;
+  // Pruned here, but named: the caller tells the model these are read-only rather
+  // than letting a proposed edit to one be discarded without a reason.
+  if (!withinRoot(confineTo, identity)) {
+    confined.push(relative);
+    return;
+  }
+  // A link may point at anything - in the layout that motivated following links at
+  // all, a whole plugin repository. Only the file the skill layout loads is taken,
+  // so the target's subtree is never walked, copied, or read.
+  //
+  // This is also the whole reason a cycle cannot be walked. A self link, a link back
+  // to an ancestor and a mutual pair are all directory links, and none of them is
+  // descended into; a real directory is always deeper than its parents, so ordinary
+  // recursion terminates. Anyone restoring subtree walking under a symlinked directory
+  // must reinstate cycle detection in the same change, or the walk recurses until the
+  // stack blows.
+  if (entry.isSymbolicLink()) {
+    const leaf = path.join(child, SKILL_FILENAME);
+    if (prefix === "" && isFile(leaf)) take(leaf, path.posix.join(relative, SKILL_FILENAME));
+    return;
+  }
+  out.push(...walkFiles(child, relative, confineTo, confined));
 }
 
 /** Why a loaded skill is absent from the staging copy: the skill index must say which. */
@@ -351,44 +360,11 @@ export function splitRemovalHunk(hunk, { oldText, oldLines, recovered }) {
   // element is the empty string, which no text removal reaches).
   if (hunk.oldEnd === oldLines.length) return null;
 
-  const lineKinds = new Map();
-  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
-    const normalized = normalizeRecoveryLine(oldLines[lineNo - 1]);
-    if (!normalized) continue;
-    const remaining = recovered.get(normalized) || 0;
-    lineKinds.set(lineNo, remaining > 0 ? "recovered" : "deleted");
-    if (remaining > 0) recovered.set(normalized, remaining - 1);
-  }
+  const lineKinds = classifyRemovedLines(hunk, oldLines, recovered);
+  if (unitMixesKinds(hunk, oldText, lineKinds)) return null;
+  if (headingSplitsFromContent(hunk, oldLines, lineKinds)) return null;
 
-  for (const unit of parseMemoryUnits(oldText)) {
-    const start = Math.max(unit.startLine, hunk.oldStart);
-    const end = Math.min(unit.endLine, hunk.oldEnd);
-    if (start > end) continue;
-    const kinds = new Set();
-    for (let lineNo = start; lineNo <= end; lineNo += 1) {
-      if (lineKinds.has(lineNo)) kinds.add(lineKinds.get(lineNo));
-    }
-    if (kinds.size > 1) return null;
-  }
-
-  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
-    if (!/^#{1,6}\s+/.test(oldLines[lineNo - 1] || "")) continue;
-    let contentLine = lineNo + 1;
-    while (contentLine <= hunk.oldEnd && !normalizeRecoveryLine(oldLines[contentLine - 1])) contentLine += 1;
-    if (contentLine > hunk.oldEnd || /^#{1,6}\s+/.test(oldLines[contentLine - 1] || "")) continue;
-    if (lineKinds.get(lineNo) !== lineKinds.get(contentLine)) return null;
-  }
-
-  // Group the removed lines into maximal runs by recovery; blank lines never start a
-  // run and attach to whichever run surrounds them.
-  const runs = [];
-  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
-    const kind = lineKinds.get(lineNo);
-    if (!kind) continue;
-    const current = runs[runs.length - 1];
-    if (current && current.kind === kind) current.last = lineNo;
-    else runs.push({ kind, first: lineNo, last: lineNo });
-  }
+  const runs = groupKindRuns(hunk, lineKinds);
   if (runs.length < 2) return null;
 
   const subHunks = runs.map((run, index) => {
@@ -408,6 +384,62 @@ export function splitRemovalHunk(hunk, { oldText, oldLines, recovered }) {
 
   if (subHunks.some((sub) => !sub.find || countOccurrences(oldText, sub.find) !== 1)) return null;
   return subHunks;
+}
+
+/** Line number -> "recovered" | "deleted" for each non-blank removed line; consumes `recovered`. */
+function classifyRemovedLines(hunk, oldLines, recovered) {
+  const lineKinds = new Map();
+  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
+    const normalized = normalizeRecoveryLine(oldLines[lineNo - 1]);
+    if (!normalized) continue;
+    const remaining = recovered.get(normalized) || 0;
+    lineKinds.set(lineNo, remaining > 0 ? "recovered" : "deleted");
+    if (remaining > 0) recovered.set(normalized, remaining - 1);
+  }
+  return lineKinds;
+}
+
+/** True when one instruction unit inside the hunk holds both recovered and deleted lines. */
+function unitMixesKinds(hunk, oldText, lineKinds) {
+  for (const unit of parseMemoryUnits(oldText)) {
+    const start = Math.max(unit.startLine, hunk.oldStart);
+    const end = Math.min(unit.endLine, hunk.oldEnd);
+    if (start > end) continue;
+    const kinds = new Set();
+    for (let lineNo = start; lineNo <= end; lineNo += 1) {
+      if (lineKinds.has(lineNo)) kinds.add(lineKinds.get(lineNo));
+    }
+    if (kinds.size > 1) return true;
+  }
+  return false;
+}
+
+/** True when a heading in the hunk and its first content line fall on different sides. */
+function headingSplitsFromContent(hunk, oldLines, lineKinds) {
+  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
+    if (!/^#{1,6}\s+/.test(oldLines[lineNo - 1] || "")) continue;
+    let contentLine = lineNo + 1;
+    while (contentLine <= hunk.oldEnd && !normalizeRecoveryLine(oldLines[contentLine - 1])) contentLine += 1;
+    if (contentLine > hunk.oldEnd || /^#{1,6}\s+/.test(oldLines[contentLine - 1] || "")) continue;
+    if (lineKinds.get(lineNo) !== lineKinds.get(contentLine)) return true;
+  }
+  return false;
+}
+
+/**
+ * Group the removed lines into maximal runs by recovery; blank lines never start a
+ * run and attach to whichever run surrounds them.
+ */
+function groupKindRuns(hunk, lineKinds) {
+  const runs = [];
+  for (let lineNo = hunk.oldStart; lineNo <= hunk.oldEnd; lineNo += 1) {
+    const kind = lineKinds.get(lineNo);
+    if (!kind) continue;
+    const current = runs[runs.length - 1];
+    if (current && current.kind === kind) current.last = lineNo;
+    else runs.push({ kind, first: lineNo, last: lineNo });
+  }
+  return runs;
 }
 
 /**
@@ -467,100 +499,25 @@ export function measureWorkspace(workspace) {
   ];
 
   const knownStaged = new Set(stagedPaths.values());
+  const surface = { root, dirMappings, skillDirs, confineTo, stagedIdentities, unstageable };
   for (const staged of [...present].sort(compareStrings)) {
     if (knownStaged.has(staged)) continue;
-    const mapping = dirMappings.find(({ staged: dir }) => staged === dir || staged.startsWith(`${dir}/`));
-    if (!mapping) {
-      stray.push({ file: staged, reason: STRAY_OUTSIDE_SURFACE });
+    const found = measureNewFile(surface, staged);
+    if (found.stray) {
+      stray.push(found.stray);
       continue;
     }
-    const inside = staged.slice(mapping.staged.length).replace(/^\//, "");
-    // Every note names the path the reader knows - the repository path, or the real one a
-    // user-scope entry resolves to - never the `.external/<hash>` the staging copy uses.
-    const logical = path.isAbsolute(mapping.logical)
-      ? path.join(mapping.logical, inside)
-      : path.posix.join(mapping.logical, inside);
-    if (!isSkillFilePath(logical, skillDirs)) {
-      stray.push({ file: logical, reason: STRAY_OUTSIDE_SURFACE });
-      continue;
-    }
-    // Staging leaves out a skill that resolves outside the repository; measurement must
-    // not carry one back in as a created file, which apply could never write either.
-    // The gate is apply's own, so the two can never disagree about what is reachable.
-    if (confineTo) {
-      try {
-        resolveMemoryPath(confineTo, logical);
-      } catch {
-        stray.push({ file: logical, reason: STRAY_OUTSIDE_REPO });
-        continue;
-      }
-    }
-    // Staging gave one name of an aliased library the write; a file written at another of
-    // its names is that same file, and apply refuses a skill whose path already exists -
-    // a refusal that drops every other accepted edit with it.
-    const repoIdentity = mapping.source ? realPath(path.join(mapping.source, inside)) : null;
-    const owner = stagedIdentities.get(repoIdentity);
-    if (owner) {
-      stray.push({ file: logical, reason: strayAliasReason(owner) });
-      continue;
-    }
-    // Staging withheld this skill because a write to it could not land, and the skill
-    // index says so - but the model still has its path. Writing there re-creates a file
-    // apply refuses for already existing, and that refusal drops every accepted edit.
-    const withheld = unstageable.some(
-      (entry) =>
-        entry.reason === READ_ONLY_UNWRITABLE &&
-        (entry.path === logical || (entry.identity && entry.identity === repoIdentity)),
-    );
-    if (withheld) {
-      stray.push({ file: logical, reason: STRAY_UNWRITABLE });
-      continue;
-    }
-    const text = fs.readFileSync(path.join(root, staged), "utf8");
-    texts.set(logical, text);
-    changes.push({
-      kind: "created",
-      file: logical,
-      workspaceFile: staged,
-      text,
-      skill: parseSkillFile(logical, text),
-    });
+    texts.set(found.change.file, found.change.text);
+    changes.push(found.change);
   }
 
   // Split any memory-file removal that mixes extracted text (recovered in a created
   // skill or in a modified existing one) with deleted text, so the deletion is its own
   // measured change and stays independently decidable.
-  const createdTexts = changes.filter((c) => c.kind === "created").map((c) => c.text);
-  const extendedSkillFiles = [
-    ...new Set(
-      changes
-        .filter((c) => c.kind === "hunk" && c.file !== memoryPath && isSkillFilePath(c.file, skillDirs))
-        .map((c) => c.file),
-    ),
-  ];
-  const recoveredTexts = [...createdTexts, ...extendedSkillFiles.map((file) => texts.get(file) ?? "")];
+  const recoveredTexts = recoveredSourceTexts(changes, memoryPath, skillDirs, texts);
   if (recoveredTexts.length) {
-    const recovered = recoveredLineCounts(recoveredTexts);
     const oldText = originals.get(memoryPath) ?? "";
-    const oldLines = oldText.split("\n");
-    const measured = [];
-    for (const change of changes) {
-      if (change.kind !== "hunk" || change.file !== memoryPath || !change.removed || change.added) {
-        measured.push(change);
-        continue;
-      }
-      const subHunks = splitRemovalHunk(change, { oldText, oldLines, recovered });
-      if (subHunks) {
-        measured.push(
-          ...subHunks.map((sub) => ({
-            kind: "hunk",
-            file: memoryPath,
-            workspaceFile: change.workspaceFile,
-            ...sub,
-          })),
-        );
-      } else measured.push(change);
-    }
+    const measured = splitMixedRemovals(changes, memoryPath, oldText, recoveredLineCounts(recoveredTexts));
     changes.splice(0, changes.length, ...measured);
   }
 
@@ -569,6 +526,97 @@ export function measureWorkspace(workspace) {
   });
 
   return { changes, stray, texts, originals, signature: signatureOf(changes) };
+}
+
+/**
+ * Classify one file present in the staging copy that no original accounts for: a created
+ * skill file `{ change }`, or a note that it is out of reach `{ stray }`.
+ */
+function measureNewFile({ root, dirMappings, skillDirs, confineTo, stagedIdentities, unstageable }, staged) {
+  const mapping = dirMappings.find(({ staged: dir }) => staged === dir || staged.startsWith(`${dir}/`));
+  if (!mapping) return { stray: { file: staged, reason: STRAY_OUTSIDE_SURFACE } };
+  const inside = staged.slice(mapping.staged.length).replace(/^\//, "");
+  // Every note names the path the reader knows - the repository path, or the real one a
+  // user-scope entry resolves to - never the `.external/<hash>` the staging copy uses.
+  const logical = path.isAbsolute(mapping.logical)
+    ? path.join(mapping.logical, inside)
+    : path.posix.join(mapping.logical, inside);
+  const strayAt = (reason) => ({ stray: { file: logical, reason } });
+  if (!isSkillFilePath(logical, skillDirs)) return strayAt(STRAY_OUTSIDE_SURFACE);
+  // Staging leaves out a skill that resolves outside the repository; measurement must
+  // not carry one back in as a created file, which apply could never write either.
+  // The gate is apply's own, so the two can never disagree about what is reachable.
+  if (confineTo) {
+    try {
+      resolveMemoryPath(confineTo, logical);
+    } catch {
+      return strayAt(STRAY_OUTSIDE_REPO);
+    }
+  }
+  // Staging gave one name of an aliased library the write; a file written at another of
+  // its names is that same file, and apply refuses a skill whose path already exists -
+  // a refusal that drops every other accepted edit with it.
+  const repoIdentity = mapping.source ? realPath(path.join(mapping.source, inside)) : null;
+  const owner = stagedIdentities.get(repoIdentity);
+  if (owner) return strayAt(strayAliasReason(owner));
+  // Staging withheld this skill because a write to it could not land, and the skill
+  // index says so - but the model still has its path. Writing there re-creates a file
+  // apply refuses for already existing, and that refusal drops every accepted edit.
+  const withheld = unstageable.some(
+    (entry) =>
+      entry.reason === READ_ONLY_UNWRITABLE &&
+      (entry.path === logical || (entry.identity && entry.identity === repoIdentity)),
+  );
+  if (withheld) return strayAt(STRAY_UNWRITABLE);
+  const text = fs.readFileSync(path.join(root, staged), "utf8");
+  return {
+    change: {
+      kind: "created",
+      file: logical,
+      workspaceFile: staged,
+      text,
+      skill: parseSkillFile(logical, text),
+    },
+  };
+}
+
+/** Texts that can carry text removed from the memory file: created skills and edited existing ones. */
+function recoveredSourceTexts(changes, memoryPath, skillDirs, texts) {
+  const createdTexts = changes.filter((c) => c.kind === "created").map((c) => c.text);
+  const extendedSkillFiles = [
+    ...new Set(
+      changes
+        .filter((c) => c.kind === "hunk" && c.file !== memoryPath && isSkillFilePath(c.file, skillDirs))
+        .map((c) => c.file),
+    ),
+  ];
+  return [...createdTexts, ...extendedSkillFiles.map((file) => texts.get(file) ?? "")];
+}
+
+/** Replace each pure-removal memory hunk that mixes extracted and deleted text with its sub-hunks. */
+function splitMixedRemovals(changes, memoryPath, oldText, recovered) {
+  const oldLines = oldText.split("\n");
+  const measured = [];
+  for (const change of changes) {
+    if (change.kind !== "hunk" || change.file !== memoryPath || !change.removed || change.added) {
+      measured.push(change);
+      continue;
+    }
+    const subHunks = splitRemovalHunk(change, { oldText, oldLines, recovered });
+    if (!subHunks) {
+      measured.push(change);
+      continue;
+    }
+    measured.push(
+      ...subHunks.map((sub) => ({
+        kind: "hunk",
+        file: memoryPath,
+        workspaceFile: change.workspaceFile,
+        ...sub,
+      })),
+    );
+  }
+  return measured;
 }
 
 function signatureOf(changes) {

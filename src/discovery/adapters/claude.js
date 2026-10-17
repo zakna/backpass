@@ -53,6 +53,10 @@ export function enumerate() {
   return out;
 }
 
+function parseTimestamp(timestamp, fallback) {
+  return timestamp ? Date.parse(timestamp) : fallback;
+}
+
 export function classify(candidate) {
   let id = null;
   let cwd = null;
@@ -62,12 +66,12 @@ export function classify(candidate) {
   for (const line of readHeadLines(candidate.path, HEADER_LINES)) {
     const entry = parseJsonLine(line);
     if (!entry) continue;
-    if (entry.sessionId) id = id || entry.sessionId;
-    if (entry.entrypoint) entrypoint = entrypoint || entry.entrypoint;
+    id = id || entry.sessionId || null;
+    entrypoint = entrypoint || entry.entrypoint || null;
     if (entry.cwd && !cwd) {
       cwd = entry.cwd;
       gitBranch = entry.gitBranch || gitBranch;
-      startedAt = entry.timestamp ? Date.parse(entry.timestamp) : startedAt;
+      startedAt = parseTimestamp(entry.timestamp, startedAt);
     }
   }
   if (!cwd) return null;

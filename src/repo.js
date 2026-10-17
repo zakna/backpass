@@ -125,20 +125,27 @@ function listRemoteUrls(root) {
   });
   const urls = new Set();
   for (const name of names) {
-    for (const args of [
-      ["remote", "get-url", "--all", name],
-      ["remote", "get-url", "--push", "--all", name],
-    ]) {
-      try {
-        for (const url of git(args, root).split("\n")) {
-          if (url) urls.add(url);
-        }
-      } catch {
-        continue;
-      }
-    }
+    for (const url of remoteUrlsFor(name, root)) urls.add(url);
   }
   return [...urls];
+}
+
+/** Fetch and push URLs of one remote, skipping any lookup git refuses. */
+function remoteUrlsFor(name, root) {
+  const urls = [];
+  for (const args of [
+    ["remote", "get-url", "--all", name],
+    ["remote", "get-url", "--push", "--all", name],
+  ]) {
+    try {
+      for (const url of git(args, root).split("\n")) {
+        if (url) urls.push(url);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return urls;
 }
 
 function listRemotes(root) {
@@ -207,23 +214,25 @@ export function listSiblingCloneWorktrees({ cloneRemotes, worktrees, cloneRoots 
   const known = new Set(worktrees || []);
   const found = [];
 
-  const consider = (dir) => {
-    let real;
+  for (const root of siblingSearchRoots({ worktrees, cloneRoots, repoRoot })) {
+    considerSiblingClone(root, { cloneRemotes, known, found });
+    let entries;
     try {
-      real = realpathOrSelf(dir);
+      entries = fs.readdirSync(root, { withFileTypes: true });
     } catch {
-      return;
+      continue;
     }
-    if (known.has(real) || !isGitCheckout(real)) return;
-    const theirs = listCloneRemotes(real);
-    if (!remotesOverlap(cloneRemotes, theirs)) return;
-    for (const wt of listWorktrees(real)) {
-      if (known.has(wt)) continue;
-      known.add(wt);
-      found.push(wt);
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      considerSiblingClone(path.join(root, entry.name), { cloneRemotes, known, found });
     }
-  };
+  }
 
+  return found;
+}
+
+/** The parent of each worktree plus each configured extra root, de-duplicated. */
+function siblingSearchRoots({ worktrees, cloneRoots, repoRoot }) {
   const searchRoots = new Set();
   for (const wt of worktrees || []) {
     const parent = path.dirname(wt);
@@ -234,22 +243,25 @@ export function listSiblingCloneWorktrees({ cloneRemotes, worktrees, cloneRoots 
     if (!expanded) continue;
     searchRoots.add(path.resolve(repoRoot || worktrees?.[0] || ".", expanded));
   }
+  return searchRoots;
+}
 
-  for (const root of searchRoots) {
-    consider(root);
-    let entries;
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      consider(path.join(root, entry.name));
-    }
+/** Record the worktrees of `dir` when it is a checkout sharing a remote with this repo. */
+function considerSiblingClone(dir, { cloneRemotes, known, found }) {
+  let real;
+  try {
+    real = realpathOrSelf(dir);
+  } catch {
+    return;
   }
-
-  return found;
+  if (known.has(real) || !isGitCheckout(real)) return;
+  const theirs = listCloneRemotes(real);
+  if (!remotesOverlap(cloneRemotes, theirs)) return;
+  for (const wt of listWorktrees(real)) {
+    if (known.has(wt)) continue;
+    known.add(wt);
+    found.push(wt);
+  }
 }
 
 /**

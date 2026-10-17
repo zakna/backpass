@@ -61,6 +61,36 @@ export function hexToRgb(hex) {
 
 const RESET = "\x1b[0m";
 
+/** The escape that starts an ink, or "" when the depth emits none. */
+function openSequence({ depth, inks, ink, bold }) {
+  if (depth === 0) return "";
+  const parts = [];
+  if (bold) parts.push("1");
+  if (depth === 24) {
+    const [r, g, b] = hexToRgb(inks[ink] || inks.text);
+    parts.push(`38;2;${r};${g};${b}`);
+  } else if (ANSI16[ink]) {
+    parts.push(ANSI16[ink]);
+  }
+  return parts.length ? `\x1b[${parts.join(";")}m` : "";
+}
+
+function truecolorGradient(value, inks, bold) {
+  const from = hexToRgb(inks.mint);
+  const to = hexToRgb(inks.blue);
+  const chars = [...value];
+  const steps = Math.max(chars.length - 1, 1);
+  return (
+    chars
+      .map((ch, i) => {
+        const t = i / steps;
+        const rgb = from.map((f, c) => Math.round(f + (to[c] - f) * t));
+        return `\x1b[${bold ? "1;" : ""}38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${ch}`;
+      })
+      .join("") + RESET
+  );
+}
+
 /**
  * Build a theme for one terminal. `depth` 24 emits hex inks, 4 emits ANSI-16,
  * and 0 emits no escapes at all - which is what the render tests use, so the
@@ -69,21 +99,8 @@ const RESET = "\x1b[0m";
 export function makeTheme({ depth = 24, background = "dark" } = {}) {
   const inks = INKS[background] || INKS.dark;
 
-  const open = (ink, bold) => {
-    if (depth === 0) return "";
-    const parts = [];
-    if (bold) parts.push("1");
-    if (depth === 24) {
-      const [r, g, b] = hexToRgb(inks[ink] || inks.text);
-      parts.push(`38;2;${r};${g};${b}`);
-    } else if (ANSI16[ink]) {
-      parts.push(ANSI16[ink]);
-    }
-    return parts.length ? `\x1b[${parts.join(";")}m` : "";
-  };
-
   const paint = (text, ink = "text", { bold = false } = {}) => {
-    const prefix = open(ink, bold);
+    const prefix = openSequence({ depth, inks, ink, bold });
     return prefix ? `${prefix}${text}${RESET}` : String(text);
   };
 
@@ -92,19 +109,7 @@ export function makeTheme({ depth = 24, background = "dark" } = {}) {
     const value = String(text);
     if (depth === 0) return value;
     if (depth !== 24) return paint(value, "mint", { bold });
-    const from = hexToRgb(inks.mint);
-    const to = hexToRgb(inks.blue);
-    const chars = [...value];
-    const steps = Math.max(chars.length - 1, 1);
-    return (
-      chars
-        .map((ch, i) => {
-          const t = i / steps;
-          const rgb = from.map((f, c) => Math.round(f + (to[c] - f) * t));
-          return `\x1b[${bold ? "1;" : ""}38;2;${rgb[0]};${rgb[1]};${rgb[2]}m${ch}`;
-        })
-        .join("") + RESET
-    );
+    return truecolorGradient(value, inks, bold);
   };
 
   return { depth, background, inks, paint, gradient };

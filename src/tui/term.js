@@ -88,6 +88,20 @@ export function detectBackground({
     return Promise.resolve(fallback);
   }
 
+  return queryTerminalBackground({ stdin, stderr, timeoutMs, fallback });
+}
+
+/** The parsed background, the fallback once the reply terminated unparseably, else null (keep waiting). */
+function oscVerdict(response, fallback) {
+  const parsed = backgroundFromOscResponse(response);
+  if (parsed) return parsed;
+  // A terminator without a parseable color means the terminal answered
+  // something we do not understand - stop waiting.
+  if (response.includes("\x07") || response.includes("\x1b\\")) return fallback;
+  return null;
+}
+
+function queryTerminalBackground({ stdin, stderr, timeoutMs, fallback }) {
   return new Promise((resolve) => {
     let settled = false;
     let response = "";
@@ -109,11 +123,8 @@ export function detectBackground({
 
     const onData = (chunk) => {
       response += chunk.toString("utf8");
-      const parsed = backgroundFromOscResponse(response);
-      if (parsed) finish(parsed);
-      // A terminator without a parseable color means the terminal answered
-      // something we do not understand - stop waiting.
-      else if (response.includes("\x07") || response.includes("\x1b\\")) finish(fallback);
+      const verdict = oscVerdict(response, fallback);
+      if (verdict) finish(verdict);
     };
 
     const timer = setTimeout(() => finish(fallback), timeoutMs);

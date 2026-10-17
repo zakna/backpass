@@ -82,7 +82,7 @@ export async function discoverTranscripts({
   const transcripts = [];
   const identities = new Set();
   const perHarness = {};
-  let cacheDirty = false;
+  const dirty = { scanCache: false };
   const hosts = resolveHostList(config);
 
   emitProgress("discover:start", { harnesses: selected.filter((h) => getAdapter(h)) });
@@ -99,46 +99,19 @@ export async function discoverTranscripts({
     emitProgress("discover:harness:start", { harness });
 
     try {
-      const found = adapter.discover
-        ? await discoverDirect(adapter, {
-            repo,
-            config,
-            cutoffMs,
-            strict,
-            stats,
-            associateFn,
-            stateDir,
-            userFilter,
-          })
-        : discoverFiles(adapter, {
-            repo,
-            config,
-            cutoffMs,
-            strict,
-            stats,
-            cache,
-            associateFn,
-            stateDir,
-            userFilter,
-            markDirty: () => {
-              cacheDirty = true;
-            },
-          });
-      const unique = found.filter((transcript) => {
-        if (identities.has(transcript.identity)) return false;
-        identities.add(transcript.identity);
-        return true;
+      const unique = await discoverLocalHarness(adapter, harness, stats, {
+        repo,
+        config,
+        cutoffMs,
+        strict,
+        cache,
+        associateFn,
+        stateDir,
+        userFilter,
+        identities,
+        dirty,
       });
       transcripts.push(...unique);
-      stats.matched = unique.length;
-      emitProgress("discover:harness:done", {
-        harness,
-        scanned: stats.scanned,
-        cached: stats.cached,
-        matched: stats.matched,
-        self: stats.self,
-        tiers: tierCounts(unique),
-      });
     } catch (err) {
       stats.error = err.message;
       warn(`${harness}: transcript store unreadable (${err.message}) - harness skipped`);
@@ -146,24 +119,18 @@ export async function discoverTranscripts({
     }
   }
 
-  if (cacheDirty) config.state.writeScanCache(cache);
+  if (dirty.scanCache) config.state.writeScanCache(cache);
 
-  const perHost = [];
-  const remoteMasters = [];
-  if (hosts.length) {
-    const collected = await collectHosts({
-      hosts,
-      harnesses: selected.filter((h) => getAdapter(h)),
-      cutoffMs,
-      controlPath: createControlPath(),
-    });
-    remoteMasters.push(...collected.map((result) => result.master).filter(Boolean));
-    for (const result of collected) {
-      const entry = hosts.find((h) => h.host === result.host);
-      transcripts.push(...remoteTranscripts(result, entry, { scope, repo, config, strict, identities }));
-      perHost.push(hostSummary(result));
-    }
-  }
+  const { perHost, remoteMasters } = await collectRemote(hosts, {
+    harnesses: selected.filter((h) => getAdapter(h)),
+    cutoffMs,
+    transcripts,
+    scope,
+    repo,
+    config,
+    strict,
+    identities,
+  });
 
   const duplicates = dropCrossHostDuplicates(transcripts);
   for (const row of perHost) row.duplicates = duplicates.get(row.host) || 0;
@@ -178,6 +145,57 @@ export async function discoverTranscripts({
     cutoffMs,
     remoteMasters,
   };
+}
+
+/** Discover one local harness; returns the transcripts not already seen under another harness store. */
+async function discoverLocalHarness(adapter, harness, stats, ctx) {
+  const { repo, config, cutoffMs, strict, cache, associateFn, stateDir, userFilter, identities, dirty } = ctx;
+  const found = adapter.discover
+    ? await discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, associateFn, stateDir, userFilter })
+    : discoverFiles(adapter, {
+        repo,
+        config,
+        cutoffMs,
+        strict,
+        stats,
+        cache,
+        associateFn,
+        stateDir,
+        userFilter,
+        markDirty: () => {
+          dirty.scanCache = true;
+        },
+      });
+  const unique = found.filter((transcript) => {
+    if (identities.has(transcript.identity)) return false;
+    identities.add(transcript.identity);
+    return true;
+  });
+  stats.matched = unique.length;
+  emitProgress("discover:harness:done", {
+    harness,
+    scanned: stats.scanned,
+    cached: stats.cached,
+    matched: stats.matched,
+    self: stats.self,
+    tiers: tierCounts(unique),
+  });
+  return unique;
+}
+
+/** Collect every configured ssh host into `transcripts`; returns the summaries and open masters. */
+async function collectRemote(hosts, { harnesses, cutoffMs, transcripts, scope, repo, config, strict, identities }) {
+  const perHost = [];
+  const remoteMasters = [];
+  if (!hosts.length) return { perHost, remoteMasters };
+  const collected = await collectHosts({ hosts, harnesses, cutoffMs, controlPath: createControlPath() });
+  remoteMasters.push(...collected.map((result) => result.master).filter(Boolean));
+  for (const result of collected) {
+    const entry = hosts.find((h) => h.host === result.host);
+    transcripts.push(...remoteTranscripts(result, entry, { scope, repo, config, strict, identities }));
+    perHost.push(hostSummary(result));
+  }
+  return { perHost, remoteMasters };
 }
 
 function hostSummary(result) {
@@ -295,17 +313,48 @@ async function discoverDirect(adapter, { repo, config, cutoffMs, strict, stats, 
       continue;
     }
     const transcript = toTranscript(adapter, row, association, row.id);
-    if (userFilter && !passesProjectFilter(transcript, config)) {
-      stats.skipped += 1;
-      continue;
-    }
-    if (isSelfSession(transcript, { stateDir })) {
-      stats.self += 1;
-      continue;
-    }
-    out.push(transcript);
+    if (admitLocal(transcript, { userFilter, config, stats, stateDir })) out.push(transcript);
   }
   return out;
+}
+
+/** The candidate's descriptor from the scan cache when its file is unchanged, else freshly classified and cached. */
+function cachedOrClassified(adapter, candidate, { repo, config, cache, stats, markDirty }) {
+  const cacheKey = `${adapter.name}:${candidate.key}`;
+  const cached = cache.entries[cacheKey];
+  if (
+    cached &&
+    cached.mtimeMs === candidate.mtimeMs &&
+    cached.bytes === candidate.bytes &&
+    hasInteractionSignals(cached.descriptor)
+  ) {
+    stats.cached += 1;
+    return cached.descriptor;
+  }
+  const descriptor = adapter.classify(candidate, { repo, config }) || null;
+  cache.entries[cacheKey] = { mtimeMs: candidate.mtimeMs, bytes: candidate.bytes, descriptor };
+  markDirty();
+  return descriptor;
+}
+
+/**
+ * The user-scope project filter, then the self-session drop: backpass's own acpx runs land
+ * in the store under this cwd, so they must never reach sampling or analysis (see ./self.js).
+ */
+function admitLocal(transcript, { userFilter, config, stats, stateDir }) {
+  if (userFilter && !passesProjectFilter(transcript, config)) {
+    stats.skipped += 1;
+    return false;
+  }
+  if (isSelfSession(transcript, { stateDir })) {
+    stats.self += 1;
+    return false;
+  }
+  return true;
+}
+
+function emitScanTick(adapter, stats, total, matched) {
+  emitProgress("discover:harness:tick", { harness: adapter.name, scanned: stats.scanned, total, matched });
 }
 
 function discoverFiles(
@@ -320,32 +369,9 @@ function discoverFiles(
     stats.scanned += 1;
     // Large stores (codex holds 10k+ session files) get a live scan tick; the
     // classify loop is synchronous, so this is the only paint opportunity.
-    if (stats.scanned % 25 === 0) {
-      emitProgress("discover:harness:tick", {
-        harness: adapter.name,
-        scanned: stats.scanned,
-        total: candidates.length,
-        matched: out.length,
-      });
-    }
+    if (stats.scanned % 25 === 0) emitScanTick(adapter, stats, candidates.length, out.length);
 
-    const cacheKey = `${adapter.name}:${candidate.key}`;
-    const cached = cache.entries[cacheKey];
-    let descriptor;
-
-    if (
-      cached &&
-      cached.mtimeMs === candidate.mtimeMs &&
-      cached.bytes === candidate.bytes &&
-      hasInteractionSignals(cached.descriptor)
-    ) {
-      stats.cached += 1;
-      descriptor = cached.descriptor;
-    } else {
-      descriptor = adapter.classify(candidate, { repo, config }) || null;
-      cache.entries[cacheKey] = { mtimeMs: candidate.mtimeMs, bytes: candidate.bytes, descriptor };
-      markDirty();
-    }
+    const descriptor = cachedOrClassified(adapter, candidate, { repo, config, cache, stats, markDirty });
 
     if (!descriptor) {
       stats.skipped += 1;
@@ -363,17 +389,7 @@ function discoverFiles(
     }
 
     const transcript = toTranscript(adapter, { ...candidate, ...descriptor }, association, descriptor.id);
-    if (userFilter && !passesProjectFilter(transcript, config)) {
-      stats.skipped += 1;
-      continue;
-    }
-    // backpass's own acpx runs land in this store under this cwd; drop them here so
-    // they never reach sampling or analysis (see ./self.js).
-    if (isSelfSession(transcript, { stateDir })) {
-      stats.self += 1;
-      continue;
-    }
-    out.push(transcript);
+    if (admitLocal(transcript, { userFilter, config, stats, stateDir })) out.push(transcript);
   }
 
   return out;
