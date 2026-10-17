@@ -211,7 +211,7 @@ export function resolveOnPath(bin, { platform = process.platform, env = process.
   if (path.isAbsolute(bin) && isExecutable(bin, platform)) return bin;
   const extensions = platform === "win32" ? (env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";") : [""];
   for (const entry of (env.PATH || "").split(path.delimiter)) {
-    const dir = entry.replace(/^"|"$/g, "");
+    const dir = entry.replaceAll(/^"|"$/g, "");
     if (!dir) continue;
     for (const extension of extensions) {
       const candidate = path.join(dir, platform === "win32" ? `${bin}${extension.toLowerCase()}` : bin);

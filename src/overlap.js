@@ -31,8 +31,8 @@ function textVariants(text) {
 function normalizeIndexLabel(text) {
   return text
     .toLowerCase()
-    .replace(/[`*_~[\]()]/g, "")
-    .replace(/\s+/g, " ")
+    .replaceAll(/[`*_~[\]()]/g, "")
+    .replaceAll(/\s+/g, " ")
     .trim();
 }
 

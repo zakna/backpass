@@ -87,7 +87,7 @@ function networkRemoteIdentity(remote) {
     repositoryPath = match[2];
   }
 
-  repositoryPath = repositoryPath.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+  repositoryPath = repositoryPath.replaceAll(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
   return host && repositoryPath ? `remote:${host}/${repositoryPath}` : null;
 }
 
@@ -119,7 +119,10 @@ function listRemoteUrls(root) {
     return [];
   }
 
-  names.sort((a, b) => (a === "origin" ? -1 : b === "origin" ? 1 : a.localeCompare(b)));
+  names.sort((a, b) => {
+    if (a === "origin") return -1;
+    return b === "origin" ? 1 : a.localeCompare(b);
+  });
   const urls = new Set();
   for (const name of names) {
     for (const args of [

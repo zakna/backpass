@@ -22,9 +22,9 @@ export const LAVISH_BIN = process.env.BACKPASS_LAVISH_BIN || "lavish-axi";
 /** Inline a JSON payload safely: `</script>` inside data must not close the tag. */
 export function injectPayload(template, payload, toolVersion) {
   const json = JSON.stringify({ ...payload, toolVersion })
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+    .replaceAll(/</g, "\\u003c")
+    .replaceAll(/\u2028/g, "\\u2028")
+    .replaceAll(/\u2029/g, "\\u2029");
   const tag = `<script>window.__BACKPASS_PROPOSAL__ = ${json};</script>`;
   if (!template.includes("</head>")) return `${tag}\n${template}`;
   // A function replacer, not a string one: a string second argument to `replace` treats

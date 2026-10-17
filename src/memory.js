@@ -29,8 +29,8 @@ const FENCE = /^\s*(```|~~~)/;
 function normalizeForHash(text) {
   return text
     .toLowerCase()
-    .replace(/[`*_~]/g, "")
-    .replace(/\s+/g, " ")
+    .replaceAll(/[`*_~]/g, "")
+    .replaceAll(/\s+/g, " ")
     .trim();
 }
 
@@ -388,12 +388,14 @@ export function memorySetHash(files) {
 export function memorySurfaceHash(setHash, skills) {
   if (!skills?.length) return setHash;
   const layer = skills.map((s) => `${s.path}:${s.name || ""}:${s.description || ""}`).join("|");
-  return `sha256:${sha256(`${setHash}|${layer}`).slice(0, 16)}`;
+  const digest = sha256(`${setHash}|${layer}`).slice(0, 16);
+  return `sha256:${digest}`;
 }
 
 function formatIndexEntry(unit) {
   const lines = unit.startLine === unit.endLine ? `L${unit.startLine}` : `L${unit.startLine}-${unit.endLine}`;
-  return `[${unit.id}] (${unit.tokens} tok, ${lines})${unit.section ? ` <${unit.section}>` : ""}\n${unit.text}`;
+  const section = unit.section ? ` <${unit.section}>` : "";
+  return `[${unit.id}] (${unit.tokens} tok, ${lines})${section}\n${unit.text}`;
 }
 
 /**
@@ -408,9 +410,10 @@ export function renderInstructionIndex(file) {
   for (const unit of file.units) {
     if (unit.parts?.length) {
       const lines = unit.startLine === unit.endLine ? `L${unit.startLine}` : `L${unit.startLine}-${unit.endLine}`;
+      const section = unit.section ? ` <${unit.section}>` : "";
       blocks.push(
         `Oversized paragraph ${unit.id} (${unit.tokens} tok, ${lines})` +
-          `${unit.section ? ` <${unit.section}>` : ""} is one blob; ${unit.id} is only its line-oriented alias. ` +
+          `${section} is one blob; ${unit.id} is only its line-oriented alias. ` +
           `Attribute evidence only to the sentence-part IDs below ` +
           `(${unit.parts.map((part) => part.id).join(", ")}). If these fail to steer, split the ` +
           `paragraph into list items in place - a bold label on the blob is not a strengthen.`,
@@ -485,7 +488,7 @@ export function reanchor(reference, file, threshold = 0.6) {
  */
 export function pointerImportPath(text, options = {}) {
   const lines = text
-    .replace(/<!--[\s\S]*?-->/g, "")
+    .replaceAll(/<!--[\s\S]*?-->/g, "")
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
@@ -496,15 +499,20 @@ export function pointerImportPath(text, options = {}) {
   const spec = imported.slice(1);
   const home = options.home || os.homedir();
   const fromDir = options.fromDir || options.root || "";
-  const expanded = spec === "~" ? home : spec.startsWith("~/") ? path.join(home, spec.slice(2)) : spec;
+  const expanded = expandHome(spec, home);
   return path.isAbsolute(expanded) ? expanded : path.resolve(fromDir || ".", expanded);
+}
+
+function expandHome(spec, home) {
+  if (spec === "~") return home;
+  return spec.startsWith("~/") ? path.join(home, spec.slice(2)) : spec;
 }
 
 export function isPointerTo(text, target, options = {}) {
   const resolvedSpec = pointerImportPath(text, options);
   if (!resolvedSpec) return false;
   const home = options.home || os.homedir();
-  const expandedTarget = target === "~" ? home : target.startsWith("~/") ? path.join(home, target.slice(2)) : target;
+  const expandedTarget = expandHome(target, home);
   const fromDir = options.fromDir || options.root || "";
   const resolvedTarget = path.isAbsolute(expandedTarget)
     ? expandedTarget

@@ -51,7 +51,7 @@ function renderEntries(entries) {
 function firstMistake(entry) {
   for (const obs of Object.values(entry.sessions)) {
     const flat = String(obs.mistake || "")
-      .replace(/\s+/g, " ")
+      .replaceAll(/\s+/g, " ")
       .trim();
     if (flat) return flat.length > 160 ? `${flat.slice(0, 160)}...` : flat;
   }

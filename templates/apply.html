@@ -959,12 +959,17 @@
         function funnelBar(host, label, lanes, scale, opts) {
           var o = opts || {};
           var total = lanes[0] + lanes[1];
-          var row = el("div", "frow" + (total === 0 ? " zero" : o.lit ? " lit" : ""));
+          var rowState = "";
+          if (total === 0) rowState = " zero";
+          else if (o.lit) rowState = " lit";
+          var row = el("div", "frow" + rowState);
           row.appendChild(el("span", "fl", label));
           var track = el("div", "fb");
           var overScale = scale > 0 && total > scale;
           var widths = lanes.map(function (value) {
-            return scale > 0 ? Math.max((value / (overScale ? total : scale)) * 100, value > 0 ? 0.6 : 0) : 0;
+            if (scale <= 0) return 0;
+            var minWidth = value > 0 ? 0.6 : 0;
+            return Math.max((value / (overScale ? total : scale)) * 100, minWidth);
           });
           if (overScale && lanes[0] > 0 && lanes[1] > 0) {
             widths[0] = Math.min(widths[0], 99.4);
@@ -1020,23 +1025,25 @@
             "duplicates: the same instruction or the same mistake, reported more than once",
           );
           funnelBar(bars, "candidates", funnel.candidates, scale);
-          funnelDrop(
-            bars,
-            funnel.seenOnce,
-            funnel.floor === 2 && P.scope !== "user"
-              ? "seen only once: a second session has to confirm them (kept for later runs)"
-              : P.scope === "user"
-                ? "fewer than " +
-                  funnel.floor +
-                  " sessions count toward corroboration: " +
-                  funnel.floor +
-                  " qualifying sessions are required (kept for later runs)"
-                : "seen in fewer than " +
-                  funnel.floor +
-                  " sessions: " +
-                  funnel.floor +
-                  " sessions have to confirm them (kept for later runs)",
-          );
+          var seenOnceReason;
+          if (funnel.floor === 2 && P.scope !== "user") {
+            seenOnceReason = "seen only once: a second session has to confirm them (kept for later runs)";
+          } else if (P.scope === "user") {
+            seenOnceReason =
+              "fewer than " +
+              funnel.floor +
+              " sessions count toward corroboration: " +
+              funnel.floor +
+              " qualifying sessions are required (kept for later runs)";
+          } else {
+            seenOnceReason =
+              "seen in fewer than " +
+              funnel.floor +
+              " sessions: " +
+              funnel.floor +
+              " sessions have to confirm them (kept for later runs)";
+          }
+          funnelDrop(bars, funnel.seenOnce, seenOnceReason);
           funnelDrop(
             bars,
             funnel.orchestration,
@@ -1158,9 +1165,12 @@
           var delta = edit.deltaTokens || 0;
           var descriptionDelta = edit.descriptionDelta || 0;
           function deltaNode(label, value) {
+            var deltaSign = "";
+            if (value < 0) deltaSign = "pos";
+            else if (value > 0) deltaSign = "neg";
             return el(
               "span",
-              "delta num " + (value < 0 ? "pos" : value > 0 ? "neg" : ""),
+              "delta num " + deltaSign,
               "Δ " + label + " " + (value > 0 ? "+" : "") + fmt(value) + " tok",
             );
           }
@@ -1260,7 +1270,8 @@
             if (file && files.indexOf(file) === -1) files.push(file);
             return files;
           }, []);
-          return files.length ? files : edit.file ? [edit.file] : [];
+          if (files.length) return files;
+          return edit.file ? [edit.file] : [];
         }
 
         // The skills one extract creates. A proposal saved before an extract could carry
@@ -1343,9 +1354,8 @@
           readout.textContent = "";
           readout.appendChild(document.createTextNode("now " + fmt(budget.current) + " tok -> if accepted "));
           // In shrink mode the file started over budget: progress is the goal, not arrival.
-          readout.appendChild(
-            el("b", (budget.mode === "shrink" ? tok >= budget.current : over) ? "over" : null, fmt(tok) + " tok"),
-          );
+          var gaugeOver = budget.mode === "shrink" ? tok >= budget.current : over;
+          readout.appendChild(el("b", gaugeOver ? "over" : null, fmt(tok) + " tok"));
           readout.appendChild(
             document.createTextNode(
               " / " +
@@ -1368,8 +1378,8 @@
           proj.appendChild(document.createTextNode(" / " + fmt(budget.capTokens) + " tok"));
 
           var btn = document.getElementById("btn-apply");
-          btn.textContent =
-            accepted > 0 ? "APPLY " + accepted + " EDIT" + (accepted === 1 ? "" : "S") + " ->" : "NOTHING TO APPLY";
+          var plural = accepted === 1 ? "" : "S";
+          btn.textContent = accepted > 0 ? "APPLY " + accepted + " EDIT" + plural + " ->" : "NOTHING TO APPLY";
           btn.disabled = accepted === 0 && rejected === 0;
         }
 

@@ -209,7 +209,7 @@ export class State {
 
 export function safeFileName(id) {
   return String(id)
-    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replaceAll(/[^A-Za-z0-9._-]/g, "_")
     .slice(0, 120);
 }
 

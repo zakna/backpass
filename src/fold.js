@@ -544,8 +544,7 @@ function renderEvidence(summary, { includeReportOnly }) {
       `${totalGapClusters} gap clusters (${summary.totals.gapClusters} synthesis eligible, ` +
       `${reportOnlyGapClusters} report only, ${summary.totals.droppedGapSingletons} singletons dropped below threshold)`,
   );
-  lines.push("");
-  lines.push("### Per-instruction evidence");
+  lines.push("", "### Per-instruction evidence");
   lines.push(
     "A negative's class is what it means: `harm` = following the instruction caused damage " +
       "(evidence against it); `non-compliance` = the agent ignored it (evidence it failed to " +
@@ -578,8 +577,7 @@ function renderEvidence(summary, { includeReportOnly }) {
     (overlap) => !representedOverlaps.has(overlap.instruction),
   );
   if (parentOverlaps.length) {
-    lines.push("");
-    lines.push("Parent paragraph cross-surface overlap:");
+    lines.push("", "Parent paragraph cross-surface overlap:");
     for (const overlap of parentOverlaps) {
       lines.push(`- ${overlap.instruction} parent paragraph`);
       renderSkillOverlap(lines, overlap);
@@ -588,14 +586,12 @@ function renderEvidence(summary, { includeReportOnly }) {
 
   const parentHarm = Object.entries(summary.parentHarmSessions || {}).filter(([, sessions]) => sessions > 0);
   if (parentHarm.length) {
-    lines.push("");
-    lines.push("Parent paragraph removal evidence aggregated across sentence parts:");
+    lines.push("", "Parent paragraph removal evidence aggregated across sentence parts:");
     for (const [id, sessions] of parentHarm) lines.push(`- ${id} harm-sessions=${sessions}`);
   }
 
   if (summary.oversized?.length) {
-    lines.push("");
-    lines.push("### Oversized units that failed to steer");
+    lines.push("", "### Oversized units that failed to steer");
     lines.push(
       "These are one paragraph apiece. Preferred reinforcement is a restructure-in-place: split " +
         "the paragraph into list items so each claim can be followed. A bold label on the blob is " +
@@ -610,8 +606,7 @@ function renderEvidence(summary, { includeReportOnly }) {
     }
   }
 
-  lines.push("");
-  lines.push("### Synthesis-eligible gap clusters (mistakes no current instruction covers)");
+  lines.push("", "### Synthesis-eligible gap clusters (mistakes no current instruction covers)");
   if (summary.totals.orchestrationGapSightings) {
     lines.push(
       `- ${summary.totals.orchestrationGapSightings} orchestration-domain sighting(s) counted as domain ` +
@@ -641,8 +636,7 @@ function renderEvidence(summary, { includeReportOnly }) {
   }
 
   if (includeReportOnly && summary.reportOnlyGaps?.length) {
-    lines.push("");
-    lines.push("### REPORT ONLY - not synthesis-eligible evidence");
+    lines.push("", "### REPORT ONLY - not synthesis-eligible evidence");
     for (const gap of summary.reportOnlyGaps) {
       lines.push(`- ${gapSessionLabel(gap)} risk=${gap.recurrenceRisk} :: ${gap.proposedInstruction}`);
     }
@@ -660,7 +654,7 @@ function gapSessionLabel(gap) {
 
 function oneLine(text, max = 240) {
   const flat = String(text || "")
-    .replace(/\s+/g, " ")
+    .replaceAll(/\s+/g, " ")
     .trim();
   return flat.length > max ? `${flat.slice(0, max)}...` : flat;
 }

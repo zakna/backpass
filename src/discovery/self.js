@@ -30,7 +30,7 @@ function jsonInner(text) {
 }
 
 function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** True when `text` (the head of a transcript file) opens a user message with the sentinel. */

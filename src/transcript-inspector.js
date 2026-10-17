@@ -121,9 +121,10 @@ export function inspectTranscript(manifest, params, state) {
     )
     .slice(0, maxMatches);
   const relevant = collectRelevantRecords(manifest.records, matches, contextTurns);
+  const roleNote = role ? ` · role: ${role}` : "";
   const body = [
     `Transcript ${manifest.ref}`,
-    `query: ${JSON.stringify(query)}${role ? ` · role: ${role}` : ""}`,
+    `query: ${JSON.stringify(query)}${roleNote}`,
     matches.length ? `matches: ${matches.length}` : "matches: 0",
     "",
     ...(matches.length
@@ -211,7 +212,9 @@ function collectRelevantRecords(records, matches, contextTurns) {
 
 /** @param {TranscriptRecord} record @param {string} query @param {boolean} matched */
 function formatRecord(record, query, matched) {
-  const label = `${record.kind}${record.role ? ` · ${record.role}` : ""}${record.name ? ` · ${record.name}` : ""}`;
+  const roleNote = record.role ? ` · ${record.role}` : "";
+  const nameNote = record.name ? ` · ${record.name}` : "";
+  const label = `${record.kind}${roleNote}${nameNote}`;
   const excerpt = matched ? excerptAround(record.text, query, 2600) : record.text.slice(0, 500);
   return `[event ${record.index} · turn ${record.turn || 0} · ${label}]\n${excerpt}`;
 }

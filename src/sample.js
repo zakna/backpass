@@ -53,6 +53,11 @@ export const DEFAULT_SAMPLE_HALF_LIFE = "14d";
 /** Minimum share of the cap reserved for each category that has at least one session. */
 export const SAMPLE_MIX_FLOOR = 0.2;
 
+function compareIdentity(a, b) {
+  if (a < b) return -1;
+  return a > b ? 1 : 0;
+}
+
 /**
  * Deterministic draw in [0, 1) for one transcript: a SHA-256 of its durable identity
  * and `seed` (or a fixed default when unseeded), so it depends only on that transcript and
@@ -140,7 +145,7 @@ function weightedSample(transcripts, count, { seed, now, halfLifeMs }) {
       key: -Math.log(u) / recencyWeight(transcript, { now, halfLifeMs }),
     };
   });
-  keyed.sort((a, b) => a.key - b.key || (a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0));
+  keyed.sort((a, b) => a.key - b.key || compareIdentity(a.identity, b.identity));
   const kept = new Set(keyed.slice(0, count).map((k) => k.index));
   return transcripts.filter((_, index) => kept.has(index));
 }

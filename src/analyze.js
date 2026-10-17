@@ -43,7 +43,7 @@ export const NEGATIVE_CLASSES = ["harm", "non-compliance", "irrelevant"];
 
 /** Whitespace-insensitive form used to check a quote against the trace it claims to come from. */
 function foldSpace(text) {
-  return String(text).replace(/\s+/g, " ").trim();
+  return String(text).replaceAll(/\s+/g, " ").trim();
 }
 
 /**
@@ -352,9 +352,11 @@ export async function analyzeTranscripts({
     model: pick.model,
   });
 
+  const modelNote = pick.model ? ` (${pick.model})` : "";
+  const effortNote = pick.effort ? ` effort=${pick.effort}` : "";
   info(
     `${color.cyan("·")} analyzing ${pending.length} transcript(s) with ${pick.agent}` +
-      `${pick.model ? ` (${pick.model})` : ""}${pick.effort ? ` effort=${pick.effort}` : ""} at jobs=${config.jobs}`,
+      `${modelNote}${effortNote} at jobs=${config.jobs}`,
   );
 
   // Rendered once per run: the ledger's open gaps, so each analysis can cite an existing
@@ -436,7 +438,7 @@ export async function analyzeTranscripts({
         failed: summary.failed,
       });
       if (done % 10 === 0 || done === pending.length) {
-        info(`${color.dim(`  ${done}/${pending.length} analyzed`)}`);
+        info(color.dim(`  ${done}/${pending.length} analyzed`));
       }
     }
   });

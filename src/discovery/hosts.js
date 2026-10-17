@@ -264,9 +264,8 @@ export async function collectHosts({ hosts, harnesses, cutoffMs, controlPath }) 
       scanned: result.scanned,
     });
     if (!liveProgress && !result.error) {
-      info(
-        `ssh ${entry.host} done · ${result.nodeVersion ? `node ${result.nodeVersion} · ` : ""}${result.scanned} scanned`,
-      );
+      const nodeNote = result.nodeVersion ? `node ${result.nodeVersion} · ` : "";
+      info(`ssh ${entry.host} done · ${nodeNote}${result.scanned} scanned`);
     }
   }
   return results;

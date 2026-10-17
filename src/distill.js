@@ -22,7 +22,7 @@ const MESSAGE_CHARS = 6000;
 
 function oneLine(text, limit) {
   const flat = String(text ?? "")
-    .replace(/\s+/g, " ")
+    .replaceAll(/\s+/g, " ")
     .trim();
   return flat.length > limit ? `${flat.slice(0, limit)}...` : flat;
 }
@@ -115,16 +115,15 @@ export function distill(events, meta, options = {}) {
       turn += 1;
       if (event.role === "user") userTurns += 1;
       else assistantTurns += 1;
-      lines.push(`### turn ${turn} · ${event.role}`);
-      lines.push(text);
-      lines.push("");
+      lines.push(`### turn ${turn} · ${event.role}`, text, "");
     } else if (event.kind === "tool") {
       toolCalls += 1;
       const input = redact(describeToolInput(event.input));
       const result = redact(describeToolResult(event.result));
       const status = event.status && event.status !== "completed" ? ` [${event.status}]` : "";
       const arrow = result ? ` -> ${result}` : "";
-      lines.push(`tool: ${event.name || "unknown"}${input ? ` ${JSON.stringify(input)}` : ""}${status}${arrow}`);
+      const inputNote = input ? ` ${JSON.stringify(input)}` : "";
+      lines.push(`tool: ${event.name || "unknown"}${inputNote}${status}${arrow}`);
     }
   }
 

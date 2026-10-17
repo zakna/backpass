@@ -17,7 +17,8 @@ import { describeTarget } from "../target.js";
  */
 /** A run-level failure carries no `file`; only a per-edit one does. */
 export function formatFailureLine(failure) {
-  const location = failure.file ? ` ${failure.file}${failure.edit ? ` (${failure.edit})` : ""}` : "";
+  const edit = failure.edit ? ` (${failure.edit})` : "";
+  const location = failure.file ? ` ${failure.file}${edit}` : "";
   return `${color.red("failed")}${location}: ${failure.error}`;
 }
 

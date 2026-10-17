@@ -218,11 +218,10 @@ export async function probeCandidate(candidate, options = {}) {
   const advertised = result.availableModels || [];
   const resolved = resolveAdvertisedModel(model, advertised, agent, options);
   if (!resolved.id) {
-    const detail = resolved.ambiguous
-      ? ambiguousModelDetail(resolved.ambiguous)
-      : advertised.length
-        ? `not among ${advertised.length} advertised model(s)`
-        : "adapter advertised no models";
+    let detail;
+    if (resolved.ambiguous) detail = ambiguousModelDetail(resolved.ambiguous);
+    else if (advertised.length) detail = `not among ${advertised.length} advertised model(s)`;
+    else detail = "adapter advertised no models";
     return { verdict: "model-unavailable", detail, resolvedModel: null };
   }
   const tieBreak = resolved.tieBreak;
@@ -579,16 +578,19 @@ function exhaustedError(role, trail) {
   const lines = trail.map((t) => {
     const label = VERDICT_LABELS[t.verdict] || t.verdict;
     const hint = hintFor(t.agent, t.verdict, t.stderr);
-    return `  ${t.model.padEnd(width)}  ${t.agent.padEnd(9)} ${label}${t.detail ? ` (${t.detail})` : ""}${hint ? `  ${hint}` : ""}`;
+    const detail = t.detail ? ` (${t.detail})` : "";
+    const hintText = hint ? `  ${hint}` : "";
+    return `  ${t.model.padEnd(width)}  ${t.agent.padEnd(9)} ${label}${detail}${hintText}`;
   });
   // "log in" is only true advice when something in the trail is actually an auth
   // failure - an all-"empty-output" trail (exhausted credits) needs its own line, not
   // login instructions that don't apply to any candidate shown above.
   const pinHint = `pin one explicitly: backpass --${role}-agent <agent> --${role}-model <id>`;
-  const closing = trail.some((t) => t.verdict === "unauthenticated")
-    ? `log in to one of the harnesses above, or ${pinHint}`
-    : trail.every((t) => t.verdict === "empty-output")
-      ? `${EMPTY_OUTPUT_HINT} for the candidates above, or ${pinHint}`
-      : pinHint;
+  let closing = pinHint;
+  if (trail.some((t) => t.verdict === "unauthenticated")) {
+    closing = `log in to one of the harnesses above, or ${pinHint}`;
+  } else if (trail.every((t) => t.verdict === "empty-output")) {
+    closing = `${EMPTY_OUTPUT_HINT} for the candidates above, or ${pinHint}`;
+  }
   return new UserError(`no available agent for the ${role} pass\n\n${lines.join("\n")}`, closing);
 }

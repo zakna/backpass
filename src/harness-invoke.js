@@ -396,7 +396,7 @@ let args = extra.concat(process.argv.slice(2));
 if (bundledPackageBin) {
   const pathEntries = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
   const packageBin = pathEntries
-    .map((entry) => path.resolve(entry.replace(/^"|"$/g, ""), "..", ...bundledPackageBin))
+    .map((entry) => path.resolve(entry.replaceAll(/^"|"$/g, ""), "..", ...bundledPackageBin))
     .find((candidate) => {
       try { return fs.statSync(candidate).isFile(); } catch { return false; }
     });

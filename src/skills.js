@@ -65,11 +65,9 @@ export function loadSkills(repoRoot, skillsDir) {
     // `readdir` reports the link itself, never its target, so the type has to be stat'd -
     // otherwise a library-plus-symlinks layout (the common way to share skills across
     // harnesses) is invisible here and its always-loaded descriptions go unbilled.
-    const file = isDirectoryEntry(root, entry)
-      ? path.join(root, entry.name, "SKILL.md")
-      : entry.name.endsWith(".md")
-        ? path.join(root, entry.name)
-        : null;
+    let file = null;
+    if (isDirectoryEntry(root, entry)) file = path.join(root, entry.name, "SKILL.md");
+    else if (entry.name.endsWith(".md")) file = path.join(root, entry.name);
     if (!file || !fs.existsSync(file)) continue;
     let text;
     try {
@@ -204,7 +202,7 @@ export function parseFrontmatter(text) {
         result[currentKey] = "";
         block = { key: currentKey, style: blockIndicator[1], chomp: blockIndicator[2], indent: null, lines: [] };
       } else {
-        result[currentKey] = rawValue.replace(/^["']|["']$/g, "");
+        result[currentKey] = rawValue.replaceAll(/^["']|["']$/g, "");
       }
     } else if (block && /^\s*$/.test(line)) {
       block.lines.push("");
@@ -237,12 +235,14 @@ function foldBlockLines(lines) {
 export function renderSkillIndex(skills) {
   if (!skills.length) return "(no skills directory found in this repo)";
   return skills
-    .map(
-      (s) =>
+    .map((s) => {
+      const readOnly = s.readOnly ? `; read-only, ${s.readOnly}` : "";
+      return (
         `- ${s.name} (${s.path}; ${s.bodyTokens} tok body, ${s.descriptionTokens} tok description` +
-        `${s.readOnly ? `; read-only, ${s.readOnly}` : ""})` +
-        ` :: ${s.description || "(no description)"}`,
-    )
+        `${readOnly})` +
+        ` :: ${s.description || "(no description)"}`
+      );
+    })
     .join("\n");
 }
 
@@ -259,7 +259,7 @@ export function renderSkillIndexForAnalysis(skills) {
 
 /** Serialize a skill draft to the common SKILL.md shape. */
 export function renderSkillFile(skill) {
-  const description = skill.description.replace(/\n+/g, " ").trim();
+  const description = skill.description.replaceAll(/\n+/g, " ").trim();
   // Generated skills are reference material that fires on its description, never a
   // slash-command: mark them non-invocable and internal so harnesses keep them out of
   // the user-facing command list.

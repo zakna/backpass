@@ -120,16 +120,15 @@ export function opencodeAuthFilePath({ env = process.env, homedir = os.homedir()
   return path.join(base, "opencode", "auth.json");
 }
 
+function authFileFor(agent, options, env, homedir) {
+  if (options.authFile !== undefined) return options.authFile;
+  if (agent === "pi") return piAuthFilePath({ env, homedir });
+  return agent === "opencode" ? opencodeAuthFilePath({ env, homedir }) : null;
+}
+
 export function providerAuthState(agent, options = {}) {
   const { env = process.env, homedir = os.homedir() } = options;
-  const file =
-    options.authFile === undefined
-      ? agent === "pi"
-        ? piAuthFilePath({ env, homedir })
-        : agent === "opencode"
-          ? opencodeAuthFilePath({ env, homedir })
-          : null
-      : options.authFile;
+  const file = authFileFor(agent, options, env, homedir);
   const hash = crypto.createHash("sha256");
   hash.update(`${agent}\0${file || ""}\0`);
   if (file) {
@@ -163,14 +162,7 @@ export function readProviderAuthTypes(agent, options = {}) {
   const types = {};
   if (agent === "pi") Object.assign(types, PI_PROVIDER_AUTH_MODE);
 
-  const file =
-    options.authFile === undefined
-      ? agent === "pi"
-        ? piAuthFilePath({ env, homedir })
-        : agent === "opencode"
-          ? opencodeAuthFilePath({ env, homedir })
-          : null
-      : options.authFile;
+  const file = authFileFor(agent, options, env, homedir);
   if (file && (agent === "pi" || agent === "opencode")) {
     const parsed = readJsonObject(file);
     if (parsed) Object.assign(types, parseAuthFileTypes(parsed));

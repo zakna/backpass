@@ -26,11 +26,8 @@ export async function cmdRun(ctx) {
   const tui = await startTui(ctx);
 
   try {
-    info(
-      `${color.bold("backpass")} ${color.dim(
-        `v${ctx.version} · ${scope?.kind === "user" ? "user scope" : repo.name} · budget ${formatTokens(config.budgetTokens)} tok · since ${config.discovery.since}`,
-      )}`,
-    );
+    const banner = `v${ctx.version} · ${scope?.kind === "user" ? "user scope" : repo.name} · budget ${formatTokens(config.budgetTokens)} tok · since ${config.discovery.since}`;
+    info(`${color.bold("backpass")} ${color.dim(banner)}`);
 
     config.state.clearProposal();
 

@@ -166,7 +166,8 @@ function headerLines(state, theme, width, spin) {
   const border = (text) => theme.paint(text, "faint");
   const lines = [border(`╭${"─".repeat(width - 2)}╮`)];
 
-  const brand = `${theme.gradient("∇", { bold: true })} ${theme.paint("backpass", "text", { bold: true })} ${theme.paint(`v${state.meta.version}`, "faint")}`;
+  const version = theme.paint(`v${state.meta.version}`, "faint");
+  const brand = `${theme.gradient("∇", { bold: true })} ${theme.paint("backpass", "text", { bold: true })} ${version}`;
   const contextParts = [state.meta.repoName];
   if (state.meta.worktrees > 1) contextParts.push(`${state.meta.worktrees} worktrees`);
   contextParts.push(`since ${state.meta.since}`);
@@ -177,9 +178,10 @@ function headerLines(state, theme, width, spin) {
     const ratio = memory.tokens / memory.budget;
     const cells = state.narrow ? 16 : 24;
     const over = memory.tokens > memory.budget;
+    const budgetText = theme.paint(`${formatCount(memory.budget)} tok`, "text");
     const left =
       `${theme.paint(memory.label || memory.path, "dim")}  ${gaugeBar(theme, ratio, cells)}  ` +
-      `${theme.paint(formatCount(memory.tokens), over ? "red" : "mint")} ${theme.paint("/", "faint")} ${theme.paint(`${formatCount(memory.budget)} tok`, "text")}`;
+      `${theme.paint(formatCount(memory.tokens), over ? "red" : "mint")} ${theme.paint("/", "faint")} ${budgetText}`;
     const right = over
       ? `${theme.paint("OVER", "red", { bold: true })}${theme.paint(" · shrink plan", "faint")}`
       : theme.paint(`${formatCount(memory.units)} instructions · budget ${Math.round(ratio * 100)}%`, "faint");
@@ -230,10 +232,9 @@ function analyzeSummary(theme, a, narrow) {
   if (!a || a.status === "pending") return "";
   if (a.status === "active") {
     const bar = gaugeBar(theme, a.pending ? a.done / a.pending : 1, narrow ? 10 : 14);
-    return `${bar} ${theme.paint(`${a.done}/${a.pending}`, "text", { bold: true })} ${theme.paint(
-      `· ${a.cached} already analyzed · jobs ${a.jobs}`,
-      "dim",
-    )}`;
+    const progress = theme.paint(`${a.done}/${a.pending}`, "text", { bold: true });
+    const note = theme.paint(`· ${a.cached} already analyzed · jobs ${a.jobs}`, "dim");
+    return `${bar} ${progress} ${note}`;
   }
   return theme.paint(`${a.ok} ok · ${a.skipped} skipped · ${a.failed} failed · ${a.cached} reused`, "dim");
 }
@@ -267,7 +268,8 @@ function synthSummary(theme, s) {
 }
 
 function sectionRule(theme, name, description, width) {
-  const left = `${theme.paint("──", "faint")} ${theme.paint(name, "text", { bold: true })}${theme.paint(` · ${description} `, "faint")}`;
+  const detail = theme.paint(` · ${description} `, "faint");
+  const left = `${theme.paint("──", "faint")} ${theme.paint(name, "text", { bold: true })}${detail}`;
   const remaining = width - visibleWidth(left);
   return left + theme.paint("─".repeat(Math.max(remaining, 0)), "faint");
 }
@@ -277,12 +279,17 @@ function harnessDot(theme, harness) {
 }
 
 /** One row per configured ssh host, under the harness rows it extends. */
+function hostMark(status) {
+  if (status === "error" || status === "done") return status;
+  return "active";
+}
+
 function hostLines(d, theme) {
   if (!d.hostOrder?.length) return [];
   const lines = [""];
   for (const name of d.hostOrder) {
     const host = d.hosts[name];
-    const glyph = mark(theme, host.status === "error" ? "error" : host.status === "done" ? "done" : "active", "·");
+    const glyph = mark(theme, hostMark(host.status), "·");
     const detail = host.error
       ? theme.paint(`${host.error} · host skipped, run continues`, "yellow")
       : theme.paint(
@@ -329,7 +336,9 @@ function discoverDetail(state, theme, width, spin) {
         ? `${formatCount(h.scanned)}/${formatCount(h.total)} sessions`
         : `${formatCount(h.scanned)} sessions`;
       const bar = showBar ? `${gaugeBar(theme, h.total ? h.scanned / h.total : 0, state.narrow ? 8 : 10)} ` : "";
-      activity = bar + theme.paint(fitPlain(text, activityWidth - (showBar ? (state.narrow ? 9 : 11) : 0)), "dim");
+      let barWidth = 0;
+      if (showBar) barWidth = state.narrow ? 9 : 11;
+      activity = bar + theme.paint(fitPlain(text, activityWidth - barWidth), "dim");
       count = padVis(
         `${theme.paint(formatCount(h.matched), "text", { bold: true })} ${theme.paint("so far", "faint")}`,
         countWidth,
@@ -354,19 +363,22 @@ function discoverDetail(state, theme, width, spin) {
     lines.push(row);
   }
 
-  lines.push(...hostLines(d, theme));
-  lines.push("");
-  lines.push(theme.paint("new = not seen by a previous scan · re-scans only read new or changed files", "faint"));
+  lines.push(
+    ...hostLines(d, theme),
+    "",
+    theme.paint("new = not seen by a previous scan · re-scans only read new or changed files", "faint"),
+  );
   return lines;
 }
 
 /** Outcome counters with parentheticals that shrink until the line fits. */
 function countersLine(a, theme, width) {
+  const note = (text) => (text ? ` ${theme.paint(text, "faint")}` : "");
   const build = (skippedNote, failedNote, reusedNote) =>
     ` ${theme.paint(String(a.ok), "mint")} ${theme.paint("ok", "dim")} ${theme.paint("·", "faint")} ` +
-    `${theme.paint(String(a.skipped), "text")} ${theme.paint("skipped", "dim")}${skippedNote ? ` ${theme.paint(skippedNote, "faint")}` : ""} ${theme.paint("·", "faint")} ` +
-    `${theme.paint(String(a.failed), "yellow")} ${theme.paint("failed", "dim")}${failedNote ? ` ${theme.paint(failedNote, "faint")}` : ""} ${theme.paint("·", "faint")} ` +
-    `${theme.paint(String(a.cached), "blue")} ${theme.paint("reused", "dim")}${reusedNote ? ` ${theme.paint(reusedNote, "faint")}` : ""}`;
+    `${theme.paint(String(a.skipped), "text")} ${theme.paint("skipped", "dim")}${note(skippedNote)} ${theme.paint("·", "faint")} ` +
+    `${theme.paint(String(a.failed), "yellow")} ${theme.paint("failed", "dim")}${note(failedNote)} ${theme.paint("·", "faint")} ` +
+    `${theme.paint(String(a.cached), "blue")} ${theme.paint("reused", "dim")}${note(reusedNote)}`;
 
   const variants = [
     build("(trivial session)", "(will retry)", "(analyzed in an earlier run)"),
@@ -405,12 +417,14 @@ function analyzeDetail(state, theme, width, spin) {
     );
   });
 
-  lines.push("");
-  lines.push(countersLine(a, theme, width));
+  lines.push("", countersLine(a, theme, width));
+  const helped = theme.paint(`✓ ${a.evidence.positive}`, "mint");
+  const violated = theme.paint(`✗ ${a.evidence.negative}`, "red");
+  const gaps = theme.paint(`◆ ${a.evidence.gaps}`, "yellow");
   lines.push(
-    ` ${theme.paint("evidence so far", "dim")}   ${theme.paint(`✓ ${a.evidence.positive}`, "mint")} ${theme.paint("helped", "faint")}` +
-      `   ${theme.paint(`✗ ${a.evidence.negative}`, "red")} ${theme.paint("violated", "faint")}` +
-      `   ${theme.paint(`◆ ${a.evidence.gaps}`, "yellow")} ${theme.paint("gaps", "faint")}`,
+    ` ${theme.paint("evidence so far", "dim")}   ${helped} ${theme.paint("helped", "faint")}` +
+      `   ${violated} ${theme.paint("violated", "faint")}` +
+      `   ${gaps} ${theme.paint("gaps", "faint")}`,
   );
   return lines;
 }
@@ -435,8 +449,9 @@ function synthesizeDetail(state, theme, width, spin) {
     );
   }
   if (s.phase === "annotate" && s.attempt > 1 && s.violations.length) {
+    const breached = theme.paint(`synthesis violated ${s.violations.length} gate(s)`, "text");
     lines.push(
-      ` ${theme.paint("!", "yellow")} ${theme.paint(`synthesis violated ${s.violations.length} gate(s)`, "text")} ${theme.paint("· re-prompting with the exact breaches", "dim")}`,
+      ` ${theme.paint("!", "yellow")} ${breached} ${theme.paint("· re-prompting with the exact breaches", "dim")}`,
     );
     for (const violation of s.violations.slice(0, 4)) {
       lines.push(`    ${theme.paint("✗", "red")} ${theme.paint(clipPlain(violation, width - 8), "dim")}`);

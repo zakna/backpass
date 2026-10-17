@@ -514,7 +514,9 @@ export async function synthesizeProposal({
 
   // Staging holds only the write surface: every skill on a surface run, none of them on
   // a memory-file target (new extracts are still measured), just the one on a skill target.
-  const stagedSkills = target.kind === "surface" ? null : target.kind === "skill" ? [target.path] : [];
+  let stagedSkills = [];
+  if (target.kind === "surface") stagedSkills = null;
+  else if (target.kind === "skill") stagedSkills = [target.path];
   const workspaceOptions = {
     state,
     repo,
@@ -585,11 +587,9 @@ export async function synthesizeProposal({
   };
 
   const pick = await config.agents.resolve("synthesis");
-  info(
-    `${color.cyan("·")} synthesizing with ${pick.agent}` +
-      `${pick.model ? ` (${pick.model})` : ""}` +
-      `${pick.effort ? ` effort=${pick.effort}` : ""}`,
-  );
+  const modelNote = pick.model ? ` (${pick.model})` : "";
+  const effortNote = pick.effort ? ` effort=${pick.effort}` : "";
+  info(`${color.cyan("·")} synthesizing with ${pick.agent}${modelNote}${effortNote}`);
   let ranWith = pick.agent;
   let chosen = pick;
   const progress = (phase, extra = {}) =>

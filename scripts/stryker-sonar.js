@@ -79,7 +79,7 @@ function message(mutant) {
 }
 
 function oneLine(text) {
-  return String(text).replace(/\s+/g, " ").trim();
+  return String(text).replaceAll(/\s+/g, " ").trim();
 }
 
 /** A SonarQube text range for a Stryker location, or the start line alone when it cannot be placed. */

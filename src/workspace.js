@@ -310,8 +310,8 @@ export function parseSkillFile(relative, text) {
  */
 export function normalizeRecoveryLine(line) {
   return String(line ?? "")
-    .replace(/[‐-―−]/g, "-")
-    .replace(/\s+/g, " ")
+    .replaceAll(/[‐-―−]/g, "-")
+    .replaceAll(/\s+/g, " ")
     .trim();
 }
 

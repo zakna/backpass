@@ -82,7 +82,8 @@ export async function cmdStatus(ctx) {
   if (!budgets.length) out("  no memory file found");
   for (const b of budgets) {
     if (b.pointerTo) {
-      out(`  ${b.path.padEnd(14)} ${color.dim(`pointer to ${b.pointerTo}`)}`);
+      const pointer = color.dim(`pointer to ${b.pointerTo}`);
+      out(`  ${b.path.padEnd(14)} ${pointer}`);
       continue;
     }
     const state_ =
@@ -182,7 +183,9 @@ export async function cmdStatus(ctx) {
 function describeRole(config, role) {
   const pinned = config.agents.pinned(role);
   if (pinned) {
-    return `${pinned.agent}${pinned.model ? `/${pinned.model}` : ""} (effort ${formatEffort(resolvedEffort(role, pinned.agent, config))}${formatTools(pinned.tools)}, ${pinned.reason})`;
+    const model = pinned.model ? `/${pinned.model}` : "";
+    const effort = formatEffort(resolvedEffort(role, pinned.agent, config));
+    return `${pinned.agent}${model} (effort ${effort}${formatTools(pinned.tools)}, ${pinned.reason})`;
   }
   const cache = config.state.readProbeCache();
   for (const candidate of config.agents.ladder(role)) {

@@ -310,10 +310,11 @@ export function classifySshFailure(
   }
   if (/Tailscale SSH requires an additional check/i.test(stderr)) {
     const url = tailscaleCheckUrl(stderr);
+    const urlNote = url ? ` at ${url}` : "";
     return {
       reason: "tailscale-check",
       message:
-        `${destination} is waiting for a Tailscale SSH check; approve it${url ? ` at ${url}` : ""} and re-run, ` +
+        `${destination} is waiting for a Tailscale SSH check; approve it${urlNote} and re-run, ` +
         `or use a key-based alias`,
     };
   }
@@ -332,18 +333,18 @@ export function classifySshFailure(
     };
   }
   if (/Could not resolve|Connection refused|No route to host|Connection timed out|Operation timed out/i.test(stderr)) {
+    const cause = tail(stderr, 1) || `no response within ${connectTimeoutSeconds}s`;
     return {
       reason: "unreachable",
-      message:
-        `${destination} unreachable (${tail(stderr, 1) || `no response within ${connectTimeoutSeconds}s`}); ` +
-        `re-run with --host none to skip hosts`,
+      message: `${destination} unreachable (${cause}); ` + `re-run with --host none to skip hosts`,
     };
   }
   if (result?.spawnError) {
     return { reason: "spawn", message: `could not run ssh for ${destination}: ${result.spawnError.message}` };
   }
   if (result?.code !== 0) {
-    return { reason: "exit", message: `ssh ${destination} exited ${result?.code}${stderr ? `: ${tail(stderr)}` : ""}` };
+    const detail = stderr ? `: ${tail(stderr)}` : "";
+    return { reason: "exit", message: `ssh ${destination} exited ${result?.code}${detail}` };
   }
   return null;
 }

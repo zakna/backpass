@@ -104,7 +104,9 @@ export class ProposalViolation extends Error {
 
 function normalizeEdit(raw, index, knownSources = null) {
   const kind = String(raw?.kind || "").toLowerCase();
-  const refs = Array.isArray(raw?.changes) ? raw.changes : Array.isArray(raw?.hunks) ? raw.hunks : [];
+  let refs = [];
+  if (Array.isArray(raw?.changes)) refs = raw.changes;
+  else if (Array.isArray(raw?.hunks)) refs = raw.hunks;
   const normalizedEvidence = normalizeEvidence(raw?.evidence);
   const evidence = normalizedEvidence.map((item) => ({
     ...item,
@@ -130,7 +132,7 @@ function normalizeEvidence(evidence) {
   return evidence
     .filter((e) => e && typeof e.text === "string" && e.text.trim())
     .map((e) => ({
-      polarity: e.polarity === "positive" ? "positive" : e.polarity === "neutral" ? "neutral" : "negative",
+      polarity: e.polarity === "positive" || e.polarity === "neutral" ? e.polarity : "negative",
       text: String(e.text).trim().slice(0, 600),
       source: String(e.source || "").slice(0, 256),
     }));
@@ -262,11 +264,10 @@ export function applyEdits(text, edits) {
 export function describeChange(change) {
   if (change.kind === "created") return `${change.id}: new file ${change.file}`;
   if (change.kind === "deleted") return `${change.id}: deletes ${change.file}`;
-  const where = change.removed
-    ? change.oldStart === change.oldEnd
-      ? `line ${change.oldStart}`
-      : `lines ${change.oldStart}-${change.oldEnd}`
-    : `after line ${change.oldStart - 1}`;
+  let where = `after line ${change.oldStart - 1}`;
+  if (change.removed) {
+    where = change.oldStart === change.oldEnd ? `line ${change.oldStart}` : `lines ${change.oldStart}-${change.oldEnd}`;
+  }
   return `${change.id}: ${change.file} ${where} (-${change.removed}/+${change.added})`;
 }
 
@@ -852,8 +853,8 @@ export function slug(text) {
   return (
     String(text)
       .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
+      .replaceAll(/[^a-z0-9]+/g, "-")
+      .replaceAll(/^-+|-+$/g, "")
       .slice(0, 60) || "skill"
   );
 }

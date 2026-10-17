@@ -159,7 +159,8 @@ async function bootstrapRunCore(ctx, deps) {
 export function printBootstrap(result, config) {
   out("");
   const files = result.files.written.map((w) => w.file).join(" + ");
-  out(`${color.bold("bootstrapped")} ${files || "nothing"} ${color.dim(`(seeded from ${result.seededFrom})`)}`);
+  const seeded = color.dim(`(seeded from ${result.seededFrom})`);
+  out(`${color.bold("bootstrapped")} ${files || "nothing"} ${seeded}`);
   for (const s of result.files.skipped) out(`  ${color.yellow("kept")} ${s.file} (${s.reason})`);
 
   if (!result.transcripts) {

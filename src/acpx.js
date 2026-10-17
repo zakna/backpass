@@ -308,8 +308,9 @@ async function verifyHarnessInvocation(invocation, cwd) {
   const args = [...(cwd ? ["--cwd", cwd] : []), "config", "show", "--format", "json"];
   const result = await run(args, { timeoutMs: 10_000, cwd, env: invocation.env });
   if (result.code !== 0) {
+    const detail = firstLine(result.stderr) || `exit ${result.code}`;
     throw new UserError(
-      `cannot verify acpx adapter configuration for ${invocation.requiredBuiltinAgent}: ${firstLine(result.stderr) || `exit ${result.code}`}`,
+      `cannot verify acpx adapter configuration for ${invocation.requiredBuiltinAgent}: ${detail}`,
       "upgrade acpx or omit the model and effort override",
     );
   }
@@ -455,10 +456,8 @@ export async function execOneShot({
       throw new AcpxError(`acpx ${agent} exec timed out after ${timeoutSeconds}s`, result);
     }
     if (result.code !== 0) {
-      throw new AcpxError(
-        `acpx ${agent} exec failed (exit ${result.code}): ${firstLine(result.stderr) || `exit ${result.code}`}`,
-        result,
-      );
+      const detail = firstLine(result.stderr) || `exit ${result.code}`;
+      throw new AcpxError(`acpx ${agent} exec failed (exit ${result.code}): ${detail}`, result);
     }
 
     const combined = `${result.stdout}\n${result.stderr}`;
@@ -553,10 +552,8 @@ export async function openSession({
     if (classifyAcpxFailure(created)) {
       throw new AcpxError(`acpx ${agent} session create failed: ${firstLine(created.stderr)}`, created);
     }
-    const err = new AcpxError(
-      `acpx ${agent} has no session support: ${firstLine(created.stderr) || `exit ${created.code}`}`,
-      created,
-    );
+    const detail = firstLine(created.stderr) || `exit ${created.code}`;
+    const err = new AcpxError(`acpx ${agent} has no session support: ${detail}`, created);
     err.unsupported = true;
     throw err;
   }
@@ -644,10 +641,8 @@ export async function openSession({
     const result = await run(args, { timeoutMs: (timeoutSeconds + 30) * 1000, cwd, env: invocation.env });
     if (result.timedOut) throw new AcpxError(`acpx ${agent} session prompt timed out after ${timeoutSeconds}s`, result);
     if (result.code !== 0) {
-      throw new AcpxError(
-        `acpx ${agent} session prompt failed (exit ${result.code}): ${firstLine(result.stderr) || `exit ${result.code}`}`,
-        result,
-      );
+      const detail = firstLine(result.stderr) || `exit ${result.code}`;
+      throw new AcpxError(`acpx ${agent} session prompt failed (exit ${result.code}): ${detail}`, result);
     }
 
     const combined = `${result.stdout}\n${result.stderr}`;
@@ -816,13 +811,15 @@ function recoverPiUsage({ promptFile, cwd, startedAt }) {
   return null;
 }
 
+function piBlockText(block) {
+  if (typeof block === "string") return block;
+  return block?.type === "text" ? (block.text ?? "") : "";
+}
+
 function piMessageText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((b) => (typeof b === "string" ? b : b?.type === "text" ? (b.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n");
+  return content.map(piBlockText).filter(Boolean).join("\n");
 }
 
 function realpathOrNull(p) {

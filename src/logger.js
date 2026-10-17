@@ -23,7 +23,7 @@ export function setQuiet(value) {
 /** Make untrusted text safe to place inside one terminal diagnostic line. */
 export function terminalSafe(value) {
   // eslint-disable-next-line no-control-regex -- terminal control bytes are the attack surface
-  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  return String(value).replaceAll(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
 /**
@@ -46,7 +46,8 @@ export function info(...args) {
 }
 
 export function step(label, detail = "") {
-  info(`${color.cyan("·")} ${label}${detail ? ` ${color.dim(detail)}` : ""}`);
+  const detailNote = detail ? ` ${color.dim(detail)}` : "";
+  info(`${color.cyan("·")} ${label}${detailNote}`);
 }
 
 export function warn(message) {

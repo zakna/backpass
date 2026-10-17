@@ -17,7 +17,7 @@ export function loadPrompt(name) {
 
 /** Simple, explicit {{TOKEN}} substitution - no template engine, no surprises. */
 export function render(template, values) {
-  return template.replace(/\{\{([A-Z_]+)\}\}/g, (match, key) =>
+  return template.replaceAll(/\{\{([A-Z_]+)\}\}/g, (match, key) =>
     Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match,
   );
 }

@@ -87,7 +87,7 @@ export function sessionSourceId(transcript = {}) {
 export function normalizeSourceLabel(source) {
   return String(source || "")
     .trim()
-    .replace(/\s+/g, " ");
+    .replaceAll(/\s+/g, " ");
 }
 
 /**
@@ -131,8 +131,8 @@ export function disambiguateSourceLabels(entries) {
 function normalize(text) {
   return String(text || "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
+    .replaceAll(/[^a-z0-9\s]/g, " ")
+    .replaceAll(/\s+/g, " ")
     .trim();
 }
 

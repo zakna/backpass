@@ -51,37 +51,37 @@ export function renderEdit(edit, index, total) {
   // A skill-file edit is on-trigger text except for its description line, which is
   // always loaded and billed; say which part of the delta is which.
   const signed = (n) => `${n > 0 ? "+" : ""}${formatTokens(n)}`;
-  const deltaText = edit.targetsMemoryFile
-    ? `${signed(delta)} tok${descriptionDelta ? ` (+${formatTokens(descriptionDelta)} tok skill description)` : ""}`
-    : descriptionDelta
-      ? `${signed(descriptionDelta)} tok always-loaded (description), ${signed(delta - descriptionDelta)} tok on trigger`
-      : `${signed(delta)} tok (not always-loaded)`;
+  let deltaText;
+  if (edit.targetsMemoryFile) {
+    const descriptionNote = descriptionDelta ? ` (+${formatTokens(descriptionDelta)} tok skill description)` : "";
+    deltaText = `${signed(delta)} tok${descriptionNote}`;
+  } else if (descriptionDelta) {
+    deltaText = `${signed(descriptionDelta)} tok always-loaded (description), ${signed(delta - descriptionDelta)} tok on trigger`;
+  } else {
+    deltaText = `${signed(delta)} tok (not always-loaded)`;
+  }
 
   out.push("");
-  out.push(`${color.bold(`[${index + 1}/${total}] ${kind}`)}  ${color.dim(deltaText)}`);
-  out.push(`  ${edit.title}`);
+  const heading = color.bold(`[${index + 1}/${total}] ${kind}`);
+  out.push(`${heading}  ${color.dim(deltaText)}`, `  ${edit.title}`);
   const hunkFiles = Array.isArray(edit.hunks)
     ? [...new Set(edit.hunks.map((hunk) => hunk.file || edit.file).filter(Boolean))]
     : [];
   const files = hunkFiles.length ? hunkFiles : [edit.file].filter(Boolean);
-  out.push(`  ${color.dim(`${files.length === 1 ? "file" : "files"}: ${files.join(", ")}`)}`);
+  const fileList = `${files.length === 1 ? "file" : "files"}: ${files.join(", ")}`;
+  out.push(`  ${color.dim(fileList)}`);
   if (edit.rationale) out.push(`  ${color.dim(edit.rationale)}`);
-  out.push("");
-  out.push(renderDiff(edit));
+  out.push("", renderDiff(edit));
 
   for (const skill of edit.kind === "extract" ? editSkills(edit) : []) {
-    out.push("");
-    out.push(color.dim(`  new skill: ${skill.path}`));
-    out.push(color.dim(`  description: ${skill.description}`));
+    out.push("", color.dim(`  new skill: ${skill.path}`), color.dim(`  description: ${skill.description}`));
   }
 
   if (edit.evidence?.length) {
-    out.push("");
-    out.push(color.dim(`  evidence (${edit.transcripts} transcript(s)):`));
+    out.push("", color.dim(`  evidence (${edit.transcripts} transcript(s)):`));
     for (const quote of edit.evidence.slice(0, 4)) {
       const mark = quote.polarity === "positive" ? color.green("+") : color.red("-");
-      out.push(`    ${mark} "${quote.text.replace(/\s+/g, " ").slice(0, 200)}"`);
-      out.push(`      ${color.dim(quote.source)}`);
+      out.push(`    ${mark} "${quote.text.replaceAll(/\s+/g, " ").slice(0, 200)}"`, `      ${color.dim(quote.source)}`);
     }
   }
 
@@ -105,11 +105,8 @@ export async function reviewInTerminal(proposal) {
   });
 
   try {
-    console.error(
-      `\n${color.bold("backpass apply")} ${color.dim(
-        `· ${proposal.repo.name} · ${proposal.memoryFile.path} · ${proposal.edits.length} proposed edit(s)`,
-      )}`,
-    );
+    const summary = `· ${proposal.repo.name} · ${proposal.memoryFile.path} · ${proposal.edits.length} proposed edit(s)`;
+    console.error(`\n${color.bold("backpass apply")} ${color.dim(summary)}`);
     console.error(
       color.dim(
         `budget: ${formatTokens(proposal.budget.current)} -> ${formatTokens(proposal.budget.projected)} / ${formatTokens(
