@@ -236,7 +236,7 @@ export function splitAttributionSentences(text) {
         closing += 1;
       }
       const value = text.slice(i + 1, closing);
-      if (closing < text.length && /^(?:[A-Za-z]:[\\/]|\\\\|\.{0,2}[\\/]|~[\\/])|[\\/]/u.test(value)) {
+      if (closing < text.length && /[\\/]/u.test(value)) {
         quotedPathEnd = closing;
         continue;
       }
