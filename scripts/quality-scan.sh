@@ -6,12 +6,16 @@
 #
 # Reporting only: findings never fail the run, and an unreachable SonarQube
 # server or missing SONAR_TOKEN prints a "skipped" line and exits 0. The only
-# non-zero exit is a failing test suite. Arguments are ignored, so the script
+# non-zero exits are a failing test suite and, with SONAR_REQUIRED=1, an empty
+# SONAR_TOKEN (before anything runs). Arguments are ignored, so the script
 # also works as a git pre-push hook.
 #
 # Environment:
 #   SONAR_TOKEN        analysis token; handed to sonar-scanner only, never
 #                      printed and never inherited by the tests or tools
+#   SONAR_REQUIRED     set to 1 to exit 1 before anything runs when SONAR_TOKEN
+#                      is empty, for unattended runs (cron) whose only purpose
+#                      is the upload and whose secret lookup can come back empty
 #   SONAR_HOST_URL     default http://192.168.42.33:9001
 #   SONAR_BRANCH       branch to analyse; default: the checked-out branch.
 #                      A detached HEAD is not uploaded unless this is set.
@@ -25,6 +29,11 @@ set -uo pipefail
 # Only sonar-scanner needs the token: keep it out of every other process.
 sonar_token=${SONAR_TOKEN:-}
 unset SONAR_TOKEN
+
+if [ "${SONAR_REQUIRED:-}" = 1 ] && [ -z "$sonar_token" ]; then
+  printf '==> quality scan: aborted (SONAR_REQUIRED=1 and SONAR_TOKEN is empty)\n' >&2
+  exit 1
+fi
 
 cd "$(git rev-parse --show-toplevel)" || exit 1
 

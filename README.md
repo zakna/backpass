@@ -871,10 +871,13 @@ run is about 20,000 mutants and takes hours.
 
 SonarQube is on the LAN, so GitHub-hosted runners cannot reach it: the full
 `main` run is scheduled on a machine that can, for example weekly from cron
-(`--incremental` keeps it to minutes after the first run):
+(`--incremental` keeps it to minutes after the first run). `SONAR_REQUIRED=1`
+makes the script exit 1 before the tests and Stryker when `SONAR_TOKEN` is
+empty, so a failed secret lookup does not burn the hours-long run; the install
+after the pull keeps `node_modules` in step with the pulled lockfile:
 
 ```cron
-0 3 * * 0  cd /path/to/backpass && git checkout -q main && git pull -q --ff-only && SONAR_TOKEN=$(bws secret get <id> | jq -r .value) scripts/quality-scan.sh
+0 3 * * 0  cd /path/to/backpass && git checkout -q main && git pull -q --ff-only && pnpm install --frozen-lockfile && SONAR_REQUIRED=1 SONAR_TOKEN=$(bws secret get <id> | jq -r .value) scripts/quality-scan.sh
 ```
 
 Last full run (2026-10-18, 390 minutes, `main` at d21f095): mutation score
@@ -884,9 +887,13 @@ timed out, 5,338 survived, 3,515 had no coverage and 9 errored. That is about
 SonarQube came from a partial run, not from this score. The run was not
 uploaded, so the figure is pending the first scheduled import.
 
-A scan from any branch other than `main` never replaces `main`'s mutant
-issues, so a count of `external_stryker` issues on `main` is only the score
-once a full `main` run has been imported.
+A scan from a branch other than `main` does not replace `main`'s mutant issues,
+as long as `SONAR_BRANCH` is unset or names the checked-out branch: with
+`SONAR_BRANCH=main` the upload goes to `main` whatever is checked out. After a
+complete `main` import the `external_stryker` count is the number of undetected
+mutants (survived plus no coverage). It is not the mutation score, because
+killed, timed-out and errored mutants are not exported; read the score from
+Stryker's report.
 
 Needs Go (the first run builds a pinned OSV-Scanner into
 `.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`),
@@ -898,7 +905,7 @@ mutation score, is `.cache/quality/stryker/mutation.html`.
 It only reports: findings and a red quality gate never fail it. Without
 `SONAR_TOKEN`, or when the server does not answer, it prints
 `SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
-tests fail. The token is handed to `sonar-scanner` alone, never to the tests
+tests fail, or when `SONAR_REQUIRED=1` and the token is empty. The token is handed to `sonar-scanner` alone, never to the tests
 or the other tools. A detached HEAD is not uploaded unless `SONAR_BRANCH`
 names its branch, so it cannot overwrite `main`'s results. A scan without the
 OSV-Scanner or the Stryker report (including `STRYKER_MODE=off`) is not
