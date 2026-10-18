@@ -869,6 +869,25 @@ SonarQube closes any mutant issue a later `main` analysis does not report
 again; `--incremental` makes reruns retest only what changed, but the first full
 run is about 20,000 mutants and takes hours.
 
+SonarQube is on the LAN, so GitHub-hosted runners cannot reach it: the full
+`main` run is scheduled on a machine that can, for example weekly from cron
+(`--incremental` keeps it to minutes after the first run):
+
+```cron
+0 3 * * 0  cd /path/to/backpass && git checkout -q main && git pull -q --ff-only && SONAR_TOKEN=$(bws secret get <id> | jq -r .value) scripts/quality-scan.sh
+```
+
+Last full run (2026-10-18, 390 minutes, `main` at d21f095): mutation score
+55.19% (67.13% of covered mutants). Of 19,766 mutants, 10,728 were killed, 176
+timed out, 5,338 survived, 3,515 had no coverage and 9 errored. That is about
+8,850 `stryker.survived` / `stryker.no-coverage` issues, so the 55 on `main` in
+SonarQube came from a partial run, not from this score. The run was not
+uploaded, so the figure is pending the first scheduled import.
+
+A scan from any branch other than `main` never replaces `main`'s mutant
+issues, so a count of `external_stryker` issues on `main` is only the score
+once a full `main` run has been imported.
+
 Needs Go (the first run builds a pinned OSV-Scanner into
 `.cache/quality-tools/`), `sonar-scanner` (`brew install sonar-scanner`),
 `curl`, and Node 22.18+ or 24.11+ for Stryker (its own floor, above the CLI's;
