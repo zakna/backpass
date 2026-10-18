@@ -6,7 +6,8 @@
 #
 # Reporting only: findings never fail the run, and an unreachable SonarQube
 # server or missing SONAR_TOKEN prints a "skipped" line and exits 0. The only
-# non-zero exit is a failing test suite. Arguments are ignored, so the script
+# non-zero exits are a failing test suite and, with SONAR_REQUIRED=1, an empty
+# SONAR_TOKEN (before anything runs). Arguments are ignored, so the script
 # also works as a git pre-push hook.
 #
 # Environment:

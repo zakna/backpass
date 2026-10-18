@@ -905,7 +905,7 @@ mutation score, is `.cache/quality/stryker/mutation.html`.
 It only reports: findings and a red quality gate never fail it. Without
 `SONAR_TOKEN`, or when the server does not answer, it prints
 `SonarQube: skipped (...)` and still exits 0. It exits non-zero only when the
-tests fail. The token is handed to `sonar-scanner` alone, never to the tests
+tests fail, or when `SONAR_REQUIRED=1` and the token is empty. The token is handed to `sonar-scanner` alone, never to the tests
 or the other tools. A detached HEAD is not uploaded unless `SONAR_BRANCH`
 names its branch, so it cannot overwrite `main`'s results. A scan without the
 OSV-Scanner or the Stryker report (including `STRYKER_MODE=off`) is not
