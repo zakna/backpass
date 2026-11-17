@@ -37,10 +37,10 @@ const PI_TRANSCRIPT_INSPECTOR_EXTENSION = path.join(
  *   grok      process `--always-approve --permission-mode bypassPermissions --sandbox workspace`
  *   pi        no extra flags (the adapter always exposes write/edit; modes are thinking)
  *   claude    acpx `--approve-all` on the prompt (client-side permission) is the contract
+ *   opencode  no proven process overlay; `--approve-all` remains the client-side gate
  *
  * Claude spawns also carry `CLAUDE_CODE_SHELL` (see `claudeShellEnv`) so its shell tool runs
  * under bash rather than the login shell; no other harness's environment changes.
- *   opencode  no proven process overlay; `--approve-all` remains the client-side gate
  *
  * No overlay requested means no wrapper, no `--model`, no `set` - same spawn as before.
  * A requested overlay with no proven invocation-scoped mechanism throws rather than
