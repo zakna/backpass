@@ -42,7 +42,8 @@ const PI_TRANSCRIPT_INSPECTOR_EXTENSION = path.join(
  * Claude spawns also carry `CLAUDE_CODE_SHELL` (see `claudeShellEnv`) so its shell tool runs
  * under bash rather than the login shell; no other harness's environment changes.
  *
- * No overlay requested means no wrapper, no `--model`, no `set` - same spawn as before.
+ * Absent a model, effort, tool, or transcript-inspector overlay, those options add no
+ * wrapper, `--model`, or `set`; write access and Claude's shell environment remain separate.
  * A requested overlay with no proven invocation-scoped mechanism throws rather than
  * writing persistent defaults or silently ignoring the request.
  */

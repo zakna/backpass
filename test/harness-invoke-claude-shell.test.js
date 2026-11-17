@@ -6,8 +6,8 @@ import path from "node:path";
 import { prepareHarnessInvocation } from "../src/harness-invoke.js";
 
 /**
- * Claude agents launched by backpass must run their shell tool under bash: zsh aborts an
- * unquoted `--include=*.md` with `no matches found`. Only the Claude invocation carries it.
+ * Claude agents launched by backpass prefer bash for their shell tool when available: zsh
+ * aborts an unquoted `--include=*.md` with `no matches found`. Only the Claude invocation carries it.
  */
 
 const posix = process.platform !== "win32";
