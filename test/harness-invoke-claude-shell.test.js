@@ -81,7 +81,7 @@ test("claude without any bash on PATH leaves the harness default", { skip: !posi
 test("other harnesses never get CLAUDE_CODE_SHELL", { skip: !posix }, () => {
   const { dir } = fakeBashDir();
   try {
-    withEnv({ CLAUDE_CODE_SHELL: undefined, PATH: dir }, () => {
+    withEnv({ CLAUDE_CODE_SHELL: undefined, PI_ACP_PI_COMMAND: undefined, PATH: dir }, () => {
       for (const opts of [
         { agent: "codex" },
         { agent: "opencode" },
