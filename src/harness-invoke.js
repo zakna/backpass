@@ -39,7 +39,11 @@ const PI_TRANSCRIPT_INSPECTOR_EXTENSION = path.join(
  *   claude    acpx `--approve-all` on the prompt (client-side permission) is the contract
  *   opencode  no proven process overlay; `--approve-all` remains the client-side gate
  *
- * No overlay requested means no wrapper, no `--model`, no `set` - same spawn as before.
+ * Claude spawns also carry `CLAUDE_CODE_SHELL` (see `claudeShellEnv`) so its shell tool runs
+ * under bash rather than the login shell; no other harness's environment changes.
+ *
+ * Absent a model, effort, tool, or transcript-inspector overlay, those options add no
+ * wrapper, `--model`, or `set`; write access and Claude's shell environment remain separate.
  * A requested overlay with no proven invocation-scoped mechanism throws rather than
  * writing persistent defaults or silently ignoring the request.
  */
@@ -96,7 +100,7 @@ export function prepareHarnessInvocation({
     return jcodeInvocation({ requestedModel, requestedEffort, requestedTools, notes, cleanups, dispose });
   }
 
-  if (!overlay && !writeAccess) return baseInvocation({ notes, dispose });
+  if (!overlay && !writeAccess) return baseInvocation({ agent, notes, dispose });
 
   try {
     let invocation;
@@ -111,12 +115,12 @@ export function prepareHarnessInvocation({
             cleanups,
             dispose,
           })
-        : baseInvocation({ notes, dispose });
+        : baseInvocation({ agent, notes, dispose });
     } else if (agent === "grok") {
       invocation = grokInvocation({ requestedModel, requestedEffort, writeAccess, notes, cleanups, dispose });
     } else if (agent === "claude" || agent === "codex" || agent === "opencode") {
       invocation = {
-        ...baseInvocation({ notes, dispose }),
+        ...baseInvocation({ agent, notes, dispose }),
         acpxModel: requestedModel,
         setEffortKey: requestedEffort ? SESSION_LOCAL_EFFORT_KEYS[agent] : null,
         requiredBuiltinAgent: overlay ? agent : null,
@@ -127,7 +131,7 @@ export function prepareHarnessInvocation({
         "pin pi, claude, codex, grok, or opencode, or omit the model and effort override",
       );
     } else {
-      invocation = baseInvocation({ notes, dispose });
+      invocation = baseInvocation({ agent, notes, dispose });
     }
     if (writeAccess && agent === "codex") applyCodexWriteAccess(invocation, { cleanups });
     return invocation;
@@ -137,9 +141,26 @@ export function prepareHarnessInvocation({
   }
 }
 
-function baseInvocation({ notes, dispose }) {
+/**
+ * Claude Code runs its shell tool under `$CLAUDE_CODE_SHELL`, else the login shell. Under zsh
+ * an unquoted `--include=*.md` aborts a search with `no matches found` and the agent carries on
+ * with less evidence, so backpass's Claude agents get bash. An already-set value wins; otherwise
+ * bash is resolved from PATH (never a hard-coded path). Claude only - other harnesses keep
+ * `env: undefined`. No bash found (or Windows) leaves the harness default alone.
+ *
+ * @returns {Record<string, string> | undefined}
+ */
+function claudeShellEnv() {
+  const configured = process.env.CLAUDE_CODE_SHELL;
+  if (configured) return { CLAUDE_CODE_SHELL: configured };
+  if (process.platform === "win32") return undefined;
+  const bash = resolveOnPath("bash");
+  return bash ? { CLAUDE_CODE_SHELL: bash } : undefined;
+}
+
+function baseInvocation({ agent = null, notes, dispose }) {
   return {
-    env: undefined,
+    env: agent === "claude" ? claudeShellEnv() : undefined,
     acpxModel: null,
     setEffortKey: null,
     sessionMode: null,
